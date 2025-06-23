@@ -214,6 +214,50 @@ New format (`drawcustom` payload):
 
 The device selection, background color, rotation, and other options are now configured through dropdown menus in the service UI.
 
+## Drawcustom Web Editor
+
+A simple web-based editor is included for building `drawcustom` payloads visually.
+
+### Running the Editor
+
+1. Open `tools/editor/index.html` directly in a browser, or run `python app.py` and visit `http://localhost:5001/`.
+2. Select a screen size preset (296x128, 154x154 or 384x168) or choose **Custom** and enter the desired width and height.
+3. Click the element buttons to add drawing items. Configure colors, fonts, anchor points and other options. Service options such as background color, rotation, dithering, TTL and dry-run stay visible above the element list so they remain accessible while scrolling.
+4. Use the **Zoom** selector to preview the canvas at 1x to 4x size. Scaling is
+   pixel-perfect so each canvas pixel becomes a block of 2×2, 3×3 or 4×4
+   pixels when zoomed.
+5. Click an element in the list to select it, then drag it on the canvas to
+   reposition it. Dragging accounts for the current zoom level so movement feels
+   natural at any scale.
+6. Choose **JavaScript** or **Python (Pyodide)** rendering using the
+   **Renderer** toggle. The Python renderer uses the same drawing
+   routines as the integration and automatically loads the bundled
+   fonts (`ppb.ttf`, `rbm.ttf`, and Material Design Icons) when
+   initialized. Debug messages are available in the optional output
+   panel below the YAML field.
+7. Use the buttons below the canvas to import or export YAML, or
+   clear all elements. YAML changes are applied a short time after you
+   stop typing to avoid errors while editing.
+
+Rotation values of 90 or 270 degrees swap the preview width and height so the
+displayed canvas matches the rotated orientation.
+
+No build step is required; all dependencies are bundled with the repository.
+The Python renderer downloads Pyodide and Pillow when first selected, so an
+internet connection is required, but the renderer code itself is embedded in the
+editor. The default JavaScript renderer provides a quick preview,
+while the Python backend mirrors the integration's rendering logic. For an exact
+result you can send the YAML to the `drawcustom` service with `dry-run: true`.
+
+### Hosting on GitHub Pages
+
+If the repository is stored on GitHub, you can enable GitHub Pages and view the editor online:
+
+1. In the repository settings, enable **GitHub Pages** with the source set to the main branch.
+2. Visit `https://<your-user>.github.io/<repo-name>/tools/editor/` to open the editor.
+
+The editor is completely static so no additional build steps are required.
+
 ## Contributing
 - Feature requests and bug reports are welcome! Please open an issue on GitHub
 - Pull requests are encouraged
