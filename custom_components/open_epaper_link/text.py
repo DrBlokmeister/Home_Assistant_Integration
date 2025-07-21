@@ -110,12 +110,7 @@ class APConfigText(TextEntity):
             dict: Device information dictionary with identifiers, name,
                   model, and manufacturer
         """
-        return {
-            "identifiers": {(DOMAIN, "ap")},
-            "name": "OpenEPaperLink AP",
-            "model": self._hub.ap_model,
-            "manufacturer": "OpenEPaperLink",
-        }
+        return self._hub.ap_device_info
 
     @property
     def available(self) -> bool:

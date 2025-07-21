@@ -16,7 +16,7 @@ from homeassistant.helpers import device_registry as dr
 from .const import DOMAIN
 from .imagegen import ImageGen
 from .tag_types import get_tag_types_manager
-from .util import send_tag_cmd, reboot_ap
+from .util import send_tag_cmd, reboot_ap, get_hub_for_tag
 
 _LOGGER: Final = logging.getLogger(__name__)
 
@@ -263,30 +263,6 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         hass: Home Assistant instance
     """
 
-    upload_queue = UploadQueueHandler(max_concurrent=1, cooldown=1.0)
-
-    async def get_hub():
-        """Get the hub instance from Home Assistant data.
-
-        Retrieves the OpenEPaperLink Hub instance from the Home Assistant
-        data registry. The Hub is the central communication point that
-        manages the connection to the AP.
-
-        Since there can only be one OpenEPaperLink integration instance,
-        this function takes the first (and should be only) entry from
-        the hass.data[DOMAIN] dictionary.
-
-        Returns:
-            Hub: The OpenEPaperLink Hub instance
-
-        Raises:
-            HomeAssistantError: If the integration is not configured yet
-                               or no Hub instance is available
-        """
-        if DOMAIN not in hass.data or not hass.data[DOMAIN]:
-            raise HomeAssistantError("Integration not configured")
-        return next(iter(hass.data[DOMAIN].values()))
-
     async def drawcustom_service(service: ServiceCall) -> None:
         """Handle drawcustom service calls.
 
@@ -312,12 +288,6 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         Raises:
             HomeAssistantError: If AP is offline or image generation fails
         """
-        hub = await get_hub()
-        if not hub.online:
-            raise HomeAssistantError(
-                "AP is offline. Please check your network connection and AP status."
-            )
-
         label_ids = service.data.get("label_id", [])
         device_ids = service.data.get("device_id", [])
 
@@ -341,6 +311,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                 entity_id = await get_entity_id_from_device_id(hass, device_id)
                 _LOGGER.debug("Processing device_id: %s (entity_id: %s)", device_id, entity_id)
 
+                tag_mac = entity_id.split(".")[1].upper()
+                hub = get_hub_for_tag(hass, tag_mac)
+                if not hub.online:
+                    device_errors.append("AP is offline")
+                    errors.extend(device_errors)
+                    continue
+
                 try:
                     # Generate image
                     image_data = await generator.generate_custom_image(
@@ -361,8 +338,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                         _LOGGER.info("Dry run completed for %s", entity_id)
                         continue
 
-                    # Queue the upload
-                    await upload_queue.add_to_queue(
+                    # Queue the upload using the hub-specific queue
+                    await hub.upload_queue.add_to_queue(
                         upload_image,
                         hub,
                         entity_id,
@@ -489,10 +466,6 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         Raises:
             HomeAssistantError: If AP is offline or request fails
         """
-        hub = await get_hub()
-        if not hub.online:
-            raise HomeAssistantError("AP is offline")
-
         device_ids = service.data.get("device_id")
         if isinstance(device_ids, str):
             device_ids = [device_ids]
@@ -501,6 +474,10 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             entity_id = await get_entity_id_from_device_id(hass, device_id)
             _LOGGER.info("Processing device_id: %s (entity_id: %s)", device_id, entity_id)
             mac = entity_id.split(".")[1].upper()
+            hub = get_hub_for_tag(hass, mac)
+            if not hub.online:
+                _LOGGER.warning("AP for %s is offline", mac)
+                continue
 
             mode = service.data.get("mode", "")
             modebyte = "1" if mode == "flash" else "0"

@@ -5,6 +5,23 @@ import requests
 import logging
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.exceptions import HomeAssistantError
+
+
+def get_hub_for_tag(hass: HomeAssistant, mac: str):
+    """Return the Hub instance responsible for a tag."""
+    mac = mac.upper()
+    for hub in hass.data.get(DOMAIN, {}).values():
+        tag_data = hub.get_tag_data(mac)
+        if tag_data:
+            ap_ip = tag_data.get("ap_ip")
+            if ap_ip == hub.host:
+                return hub
+
+    # Fallback to the first hub if none matched
+    if hass.data.get(DOMAIN):
+        return next(iter(hass.data[DOMAIN].values()))
+    raise HomeAssistantError("Integration not configured")
 _LOGGER = logging.getLogger(__name__)
 
 def get_image_folder(hass: HomeAssistant) -> str:
@@ -60,15 +77,13 @@ async def send_tag_cmd(hass: HomeAssistant, entity_id: str, cmd: str) -> bool:
     Raises:
         HomeAssistantError: If the AP is offline or entity_id is invalid
     """
-    # Get the hub from the entity_id's domain
-    entry_id = list(hass.data[DOMAIN].keys())[0]  # Get the first (and should be only) entry
-    hub = hass.data[DOMAIN][entry_id]
+    mac = entity_id.split(".")[1].upper()
+    hub = get_hub_for_tag(hass, mac)
 
     if not hub.online:
         _LOGGER.error("Cannot send command: AP is offline")
         return False
 
-    mac = entity_id.split(".")[1].upper()
     url = f"http://{hub.host}/tag_cmd"
 
     data = {
@@ -104,27 +119,26 @@ async def reboot_ap(hass: HomeAssistant) -> bool:
     Raises:
         HomeAssistantError: If the AP is offline or cannot be reached
     """
-    # Get the hub instance
-    entry_id = list(hass.data[DOMAIN].keys())[0]  # Get the first (and should be only) entry
-    hub = hass.data[DOMAIN][entry_id]
+    if DOMAIN not in hass.data or not hass.data[DOMAIN]:
+        raise HomeAssistantError("Integration not configured")
 
-    if not hub.online:
-        _LOGGER.error("Cannot reboot AP: AP is offline")
-        return False
+    for hub in hass.data[DOMAIN].values():
+        if not hub.online:
+            _LOGGER.error("Cannot reboot AP at %s: AP is offline", hub.host)
+            continue
 
-    url = f"http://{hub.host}/reboot"
+        url = f"http://{hub.host}/reboot"
 
-    try:
-        result = await hass.async_add_executor_job(lambda: requests.post(url))
-        if result.status_code == 200:
-            _LOGGER.info("Rebooted OEPL Access Point")
-            return True
-        else:
-            _LOGGER.error("Failed to reboot OEPL Access Point: HTTP %s", result.status_code)
-            return False
-    except Exception as e:
-        _LOGGER.error("Failed to reboot OEPL Access Point: %s", str(e))
-        return False
+        try:
+            result = await hass.async_add_executor_job(lambda: requests.post(url))
+            if result.status_code == 200:
+                _LOGGER.info("Rebooted OEPL Access Point at %s", hub.host)
+            else:
+                _LOGGER.error("Failed to reboot OEPL Access Point at %s: HTTP %s", hub.host, result.status_code)
+        except Exception as e:
+            _LOGGER.error("Failed to reboot OEPL Access Point at %s: %s", hub.host, str(e))
+
+    return True
 
 async def set_ap_config_item(hub, key: str, value: str | int) -> bool:
     """Set a configuration item on the Access Point.

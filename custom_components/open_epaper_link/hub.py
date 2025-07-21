@@ -22,6 +22,7 @@ _LOGGER: Final = logging.getLogger(__name__)
 
 from .const import DOMAIN, SIGNAL_AP_UPDATE, SIGNAL_TAG_UPDATE, SIGNAL_TAG_IMAGE_UPDATE
 from .tag_types import get_tag_types_manager, get_hw_string
+from .services import UploadQueueHandler
 
 STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}_tags"
@@ -95,6 +96,12 @@ class Hub:
         self.ap_env = None
         self.ap_model = "ESP32"
 
+        # Queue for image uploads
+        self.upload_queue = UploadQueueHandler(max_concurrent=1, cooldown=1.0)
+
+        # Device identifier for this AP
+        self._ap_identifier = f"ap_{self.entry.entry_id}"
+
         self._unsub_callbacks: list[CALLBACK_TYPE] = []
         self.online = False
         self._reconnect_task: asyncio.Task | None = None
@@ -106,6 +113,21 @@ class Hub:
         self._nfc_last_scan: Dict[str, datetime] = {}
         self._nfc_debounce_interval = timedelta(seconds=1)
         self._update_debounce_interval()
+
+    @property
+    def ap_device_identifier(self) -> tuple[str, str]:
+        """Return the device identifier tuple for this AP."""
+        return (DOMAIN, self._ap_identifier)
+
+    @property
+    def ap_device_info(self) -> dict:
+        """Return basic device info dictionary for this AP."""
+        return {
+            "identifiers": {self.ap_device_identifier},
+            "name": "OpenEPaperLink AP",
+            "model": self.ap_model,
+            "manufacturer": "OpenEPaperLink",
+        }
 
     def _update_debounce_interval(self) -> None:
         """Update event debounce intervals from integration options.
@@ -610,6 +632,9 @@ class Hub:
         channel = tag_data.get("ch")
         version = tag_data.get("ver")
         update_count = tag_data.get("updatecount")
+        ap_ip = tag_data.get("ap") or tag_data.get("ap_ip")
+        if not ap_ip or ap_ip == "0.0.0.0":
+            ap_ip = self.host
 
         # Check if name has changed
         old_name = existing_data.get("tag_name")
@@ -678,6 +703,7 @@ class Hub:
             "boot_count": boot_count,
             "checkin_count": checkin_count,
             "block_requests": block_requests,
+            "ap_ip": ap_ip,
         }
 
         # Handle new tag discovery

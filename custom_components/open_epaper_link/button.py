@@ -93,7 +93,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     # Add AP-level buttons
     async_add_entities([
         RebootAPButton(hass, hub),
-        RefreshTagTypesButton(hass),
+        RefreshTagTypesButton(hass, hub),
     ])
 
     # Listen for new tag discoveries
@@ -494,7 +494,7 @@ class RebootAPButton(ButtonEntity):
         # self._attr_name = "Reboot AP"
         self._attr_has_entity_name = True
         self._attr_translation_key = "reboot_ap"
-        self._attr_unique_id = "reboot_ap"
+        self._attr_unique_id = f"{hub.entry.entry_id}_reboot_ap"
         self._attr_icon = "mdi:restart"
 
     @property
@@ -506,9 +506,7 @@ class RebootAPButton(ButtonEntity):
         Returns:
             dict: Device information dictionary
         """
-        return {
-            "identifiers": {(DOMAIN, "ap")},
-        }
+        return self._hub.ap_device_info
 
     async def async_press(self) -> None:
         """Handle the button press.
@@ -531,7 +529,7 @@ class RefreshTagTypesButton(ButtonEntity):
     to inform the user of the result.
     """
 
-    def __init__(self, hass: HomeAssistant) -> None:
+    def __init__(self, hass: HomeAssistant, hub) -> None:
         """Initialize the button entity.
 
         Sets up the button with appropriate name, icon, and device association.
@@ -540,7 +538,8 @@ class RefreshTagTypesButton(ButtonEntity):
             hass: Home Assistant instance
         """
         self._hass = hass
-        self._attr_unique_id = "refresh_tag_types"
+        self._hub = hub
+        self._attr_unique_id = f"{hub.entry.entry_id}_refresh_tag_types"
         # self._attr_name = "Refresh Tag Types"
         self._attr_has_entity_name = True
         self._attr_translation_key = "refresh_tag_types"
@@ -557,12 +556,7 @@ class RefreshTagTypesButton(ButtonEntity):
         Returns:
             dict: Device information dictionary
         """
-        return {
-            "identifiers": {(DOMAIN, "ap")},
-            "name": "OpenEPaperLink AP",
-            # "model": self._hub.ap_model,
-            "manufacturer": "OpenEPaperLink",
-        }
+        return self._hub.ap_device_info
 
     async def async_press(self) -> None:
         """Handle the button press.
