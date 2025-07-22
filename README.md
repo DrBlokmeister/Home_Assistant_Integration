@@ -110,8 +110,11 @@ After setup, you can configure additional options through the integration's opti
 #### Tag Discovery
 Tags are automatically discovered when they check in with your AP. New tags will appear as devices with their MAC address as the identifier or alias if available. You can rename these in the device settings.
 
+#### Multi-AP Support
+Configure multiple OpenEPaperLink hosts by adding additional integration entries. Each AP creates its own device with configuration entities. Commands and image uploads are automatically routed to the AP that last reported the tag based on the stored `apip` value.
+
 #### Duplicate Updates
-When multiple APs report data for the same tag, the integration keeps the last known AP IP and ignores external updates for a short period (configurable via **External Update Timeout** in the options flow). Updates from the AP where `isexternal` is `False` take precedence.
+When multiple APs report the same tag, updates from the AP where `isexternal` is `False` are preferred. External updates are accepted only if the direct AP remains silent for a short, configurable timeout (**External Update Timeout**). The integration stores the last known `apip` per tag to route future uploads and commands.
 
 ## Usage Examples
 
@@ -220,4 +223,4 @@ The device selection, background color, rotation, and other options are now conf
 ## Contributing
 - Feature requests and bug reports are welcome! Please open an issue on GitHub
 - Pull requests are encouraged
-- Join the [Discord server](https://discord.com/invite/eRUHt4u5CZ) to discuss ideas and get help
+- Join the [Discord server](https://discord.com/invite/eRUHt4u5CZ) to discuss ideas and get help.

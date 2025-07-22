@@ -424,7 +424,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                         lambda: requests.post(
                             url,
                             headers={'Content-Type': mp_encoder.content_type},
-                            data=mp_encoder
+                            data=mp_encoder,
+                            timeout=30,
                         )
                     )
 
@@ -503,7 +504,9 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
 
             url = f"http://{hub.host}/led_flash?mac={mac}&pattern={pattern}"
-            result = await hass.async_add_executor_job(requests.get, url)
+            result = await hass.async_add_executor_job(
+                requests.get, url, timeout=10
+            )
             if result.status_code != 200:
                 _LOGGER.warning("LED pattern update failed with status code: %s", result.status_code)
 

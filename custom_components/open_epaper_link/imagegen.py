@@ -1992,7 +1992,8 @@ class ImageGen:
             if element['url'].startswith(('http://', 'https://')):
                 # Download web image
                 response = await self.hass.async_add_executor_job(
-                    requests.get, element['url'])
+                    requests.get, element['url'], timeout=10
+                )
                 if response.status_code != 200:
                     raise HomeAssistantError(f"Failed to download image: HTTP {response.status_code}")
                 source_img = Image.open(io.BytesIO(response.content))

@@ -8,6 +8,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.exceptions import HomeAssistantError
 
 from .const import DOMAIN
 from .util import set_ap_config_item
@@ -308,20 +309,27 @@ class TagNameText(TextEntity):
             }
             try:
                 result = await self.hass.async_add_executor_job(
-                    lambda: requests.post(url, data=data)
+                    lambda: requests.post(url, data=data, timeout=10)
                 )
                 if result.status_code != 200:
                     _LOGGER.error(
                         "Failed to update tag name %s: HTTP %s",
                         self._tag_mac,
-                        result.status_code
+                        result.status_code,
                     )
+            except requests.Timeout as err:
+                raise HomeAssistantError(
+                    f"Timeout updating tag name {self._tag_mac}: {err}"
+                ) from err
             except Exception as err:
                 _LOGGER.error(
                     "Error updating tag name for %s: %s",
                     self._tag_mac,
-                    str(err)
+                    str(err),
                 )
+                raise HomeAssistantError(
+                    f"Failed to update tag name {self._tag_mac}: {err}"
+                ) from err
 
     @callback
     def _handle_tag_update(self):

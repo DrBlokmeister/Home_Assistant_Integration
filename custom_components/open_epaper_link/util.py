@@ -92,16 +92,21 @@ async def send_tag_cmd(hass: HomeAssistant, entity_id: str, cmd: str) -> bool:
     }
 
     try:
-        result = await hass.async_add_executor_job(lambda: requests.post(url, data=data))
+        result = await hass.async_add_executor_job(
+            lambda: requests.post(url, data=data, timeout=10)
+        )
         if result.status_code == 200:
             _LOGGER.info("Sent %s command to %s", cmd, entity_id)
             return True
-        else:
-            _LOGGER.error("Failed to send %s command to %s: HTTP %s", cmd, entity_id, result.status_code)
-            return False
+        _LOGGER.error(
+            "Failed to send %s command to %s: HTTP %s", cmd, entity_id, result.status_code
+        )
+        return False
+    except requests.Timeout as err:
+        raise HomeAssistantError(f"Timeout sending {cmd} to {entity_id}: {err}") from err
     except Exception as e:
         _LOGGER.error("Failed to send %s command to %s: %s", cmd, entity_id, str(e))
-        return False
+        raise HomeAssistantError(f"Failed to send {cmd} to {entity_id}: {e}") from e
 
 async def reboot_ap(hass: HomeAssistant) -> bool:
     """Reboot the ESL Access Point.
@@ -130,13 +135,24 @@ async def reboot_ap(hass: HomeAssistant) -> bool:
         url = f"http://{hub.host}/reboot"
 
         try:
-            result = await hass.async_add_executor_job(lambda: requests.post(url))
+            result = await hass.async_add_executor_job(
+                lambda: requests.post(url, timeout=10)
+            )
             if result.status_code == 200:
                 _LOGGER.info("Rebooted OEPL Access Point at %s", hub.host)
             else:
-                _LOGGER.error("Failed to reboot OEPL Access Point at %s: HTTP %s", hub.host, result.status_code)
+                _LOGGER.error(
+                    "Failed to reboot OEPL Access Point at %s: HTTP %s",
+                    hub.host,
+                    result.status_code,
+                )
+        except requests.Timeout as err:
+            raise HomeAssistantError(
+                f"Timeout rebooting OEPL Access Point at {hub.host}: {err}"
+            ) from err
         except Exception as e:
             _LOGGER.error("Failed to reboot OEPL Access Point at %s: %s", hub.host, str(e))
+            raise HomeAssistantError(f"Failed to reboot AP at {hub.host}: {e}") from e
 
     return True
 
@@ -177,7 +193,9 @@ async def set_ap_config_item(hub, key: str, value: str | int) -> bool:
     _LOGGER.debug("Setting AP config %s = %s", key, value)
     try:
         response = await hub.hass.async_add_executor_job(
-            lambda: requests.post(f"http://{hub.host}/save_apcfg", data=data)
+            lambda: requests.post(
+                f"http://{hub.host}/save_apcfg", data=data, timeout=10
+            )
         )
         if response.status_code == 200:
             # Update local cache immediately to prevent race conditions
@@ -188,6 +206,10 @@ async def set_ap_config_item(hub, key: str, value: str | int) -> bool:
         else:
             _LOGGER.error("Failed to set AP config %s: HTTP %s", key, response.status_code)
             return False
+    except requests.Timeout as err:
+        raise HomeAssistantError(
+            f"Timeout setting {key} on {hub.host}: {err}"
+        ) from err
     except Exception as e:
         _LOGGER.error("Failed to set AP config %s: %s", key, str(e))
-        return False
+        raise HomeAssistantError(f"Failed to set {key} on {hub.host}: {e}") from e
