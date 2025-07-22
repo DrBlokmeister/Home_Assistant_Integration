@@ -20,7 +20,13 @@ import logging
 
 _LOGGER: Final = logging.getLogger(__name__)
 
-from .const import DOMAIN, SIGNAL_AP_UPDATE, SIGNAL_TAG_UPDATE, SIGNAL_TAG_IMAGE_UPDATE
+from .const import (
+    DOMAIN,
+    SIGNAL_AP_UPDATE,
+    SIGNAL_TAG_UPDATE,
+    SIGNAL_TAG_IMAGE_UPDATE,
+    DEFAULT_EXTERNAL_TIMEOUT,
+)
 from .tag_types import get_tag_types_manager, get_hw_string
 from .services import UploadQueueHandler
 
@@ -99,6 +105,13 @@ class Hub:
         # Queue for image uploads
         self.upload_queue = UploadQueueHandler(max_concurrent=1, cooldown=1.0)
 
+        # Track last update per tag for external update filtering
+        self._last_tag_updates: Dict[str, tuple[datetime, bool]] = {}
+
+        # Timeout before accepting external updates
+        external_timeout = entry.options.get("external_timeout", DEFAULT_EXTERNAL_TIMEOUT)
+        self._external_update_timeout = timedelta(seconds=external_timeout)
+
         # Device identifier for this AP
         self._ap_identifier = f"ap_{self.entry.entry_id}"
 
@@ -113,6 +126,9 @@ class Hub:
         self._nfc_last_scan: Dict[str, datetime] = {}
         self._nfc_debounce_interval = timedelta(seconds=1)
         self._update_debounce_interval()
+
+        # Apply external update timeout from options
+        self._update_external_timeout()
 
     @property
     def ap_device_identifier(self) -> tuple[str, str]:
@@ -144,6 +160,13 @@ class Hub:
         self._button_debounce_interval = timedelta(seconds=button_debounce_seconds)
         self._nfc_debounce_interval = timedelta(seconds=nfc_debounce_seconds)
 
+    def _update_external_timeout(self) -> None:
+        """Update external update timeout from options."""
+        timeout_seconds = self.entry.options.get(
+            "external_timeout", DEFAULT_EXTERNAL_TIMEOUT
+        )
+        self._external_update_timeout = timedelta(seconds=timeout_seconds)
+
     async def async_reload_config(self) -> None:
         """Reload configuration from config entry.
 
@@ -157,6 +180,7 @@ class Hub:
         """
         await self.async_reload_blacklist()
         self._update_debounce_interval()
+        self._update_external_timeout()
 
     async def async_setup_initial(self) -> bool:
         """Set up hub without establishing a WebSocket connection.
@@ -636,6 +660,19 @@ class Hub:
         if not ap_ip or ap_ip == "0.0.0.0":
             ap_ip = self.host
 
+        # Decide whether to accept this update when multiple APs report
+        now = datetime.utcnow()
+        is_local = not is_external and ap_ip == self.host
+        last_info = self._last_tag_updates.get(tag_mac)
+        if last_info:
+            last_time, last_local = last_info
+            if not is_local and last_local:
+                if now - last_time <= self._external_update_timeout:
+                    _LOGGER.debug(
+                        "Ignoring external update for %s from %s", tag_mac, ap_ip
+                    )
+                    return False
+
         # Check if name has changed
         old_name = existing_data.get("tag_name")
         if old_name and old_name != tag_name:
@@ -705,6 +742,9 @@ class Hub:
             "block_requests": block_requests,
             "ap_ip": ap_ip,
         }
+
+        # Store timestamp and locality for conflict resolution
+        self._last_tag_updates[tag_mac] = (now, is_local)
 
         # Handle new tag discovery
         if is_new_tag:

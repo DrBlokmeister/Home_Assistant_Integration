@@ -110,6 +110,9 @@ After setup, you can configure additional options through the integration's opti
 #### Tag Discovery
 Tags are automatically discovered when they check in with your AP. New tags will appear as devices with their MAC address as the identifier or alias if available. You can rename these in the device settings.
 
+#### Duplicate Updates
+When multiple APs report data for the same tag, the integration keeps the last known AP IP and ignores external updates for a short period (configurable via **External Update Timeout** in the options flow). Updates from the AP where `isexternal` is `False` take precedence.
+
 ## Usage Examples
 
 ### Basic Text Display

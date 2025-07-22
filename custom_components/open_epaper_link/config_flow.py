@@ -17,7 +17,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.selector import Selector, TextSelectorType
 
-from .const import DOMAIN
+from .const import DOMAIN, DEFAULT_EXTERNAL_TIMEOUT
 import logging
 
 _LOGGER: Final = logging.getLogger(__name__)
@@ -225,6 +225,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         self._button_debounce = self.config_entry.options.get("button_debounce", 0.5)
         self._nfc_debounce = self.config_entry.options.get("nfc_debounce", 1.0)
         self._custom_font_dirs = self.config_entry.options.get("custom_font_dirs", "")
+        self._external_timeout = self.config_entry.options.get("external_timeout", DEFAULT_EXTERNAL_TIMEOUT)
 
     async def async_step_init(self, user_input=None):
         """Manage OpenEPaperLink options.
@@ -250,6 +251,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     "button_debounce": user_input.get("button_debounce", 0.5),
                     "nfc_debounce": user_input.get("nfc_debounce", 1.0),
                     "custom_font_dirs": user_input.get("custom_font_dirs", ""),
+                    "external_timeout": user_input.get("external_timeout", DEFAULT_EXTERNAL_TIMEOUT),
                 }
             )
 
@@ -313,6 +315,18 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     selector.TextSelectorConfig(
                         type=TextSelectorType.TEXT,
                         autocomplete="path"
+                    )
+                ),
+                vol.Optional(
+                    "external_timeout",
+                    default=self._external_timeout,
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.0,
+                        max=5.0,
+                        step=0.1,
+                        unit_of_measurement="s",
+                        mode=selector.NumberSelectorMode.SLIDER,
                     )
                 ),
             }),
