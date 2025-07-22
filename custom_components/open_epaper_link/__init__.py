@@ -6,8 +6,15 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform, EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import HomeAssistant
 from .const import DOMAIN
-from .hub import Hub
-from .services import async_setup_services, async_unload_services
+import os
+
+if os.environ.get("OEPL_NO_INIT"):
+    Hub = None  # type: ignore
+    async_setup_services = None  # type: ignore
+    async_unload_services = None  # type: ignore
+else:
+    from .hub import Hub
+    from .services import async_setup_services, async_unload_services
 _LOGGER: Final = logging.getLogger(__name__)
 
 PLATFORMS = [
