@@ -283,6 +283,13 @@ TAG_SENSOR_TYPES: tuple[OpenEPaperLinkSensorEntityDescription, ...] = (
         icon="mdi:signal-distance-variant",
     ),
     OpenEPaperLinkSensorEntityDescription(
+        key="ap_ip",
+        name="Connected AP",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda data: data.get("ap_ip"),
+        icon="mdi:access-point-network",
+    ),
+    OpenEPaperLinkSensorEntityDescription(
         key="pending_updates",
         name="Pending Updates",
         state_class=SensorStateClass.MEASUREMENT,
@@ -493,7 +500,7 @@ class OpenEPaperLinkTagSensor(OpenEPaperLinkBaseSensor):
             name=name_base,
             manufacturer="OpenEPaperLink",
             model=hw_string,
-            via_device=(DOMAIN, "ap"),
+            via_device=self._hub.ap_device_identifier,
             sw_version=f"0x{int(firmware_version, 16):X}" if firmware_version else "Unknown",
             serial_number=self._tag_mac,
             hw_version=f"{width}x{height}",
@@ -599,12 +606,7 @@ class OpenEPaperLinkAPSensor(OpenEPaperLinkBaseSensor):
         self._attr_unique_id = f"{self._hub.entry.entry_id}_{description.key}"
 
         # Set device info
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, "ap")},
-            name="OpenEPaperLink AP",
-            model=self._hub.ap_model,
-            manufacturer="OpenEPaperLink",
-        )
+        self._attr_device_info = DeviceInfo(**self._hub.ap_device_info)
 
     @property
     def available(self) -> bool:

@@ -17,7 +17,10 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.selector import Selector, TextSelectorType
 
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    DEFAULT_EXTERNAL_TIMEOUT,
+)
 import logging
 
 _LOGGER: Final = logging.getLogger(__name__)
@@ -71,15 +74,17 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Remove any trailing slashes
         host = host.rstrip("/")
 
+        _LOGGER.debug("Validating OpenEPaperLink host %s", host)
+
         try:
             session = async_get_clientsession(self.hass)
             async with asyncio.timeout(10):
                 async with session.get(f"http://{host}") as response:
-                    if response.status != 200:
+                    if response.status >= 400:
                         errors["base"] = "cannot_connect"
                     else:
-                        # Store version info for later display
                         self._host = host
+                        _LOGGER.debug("Validated host %s", host)
                         return {"title": f"OpenEPaperLink AP ({host})"}, None
 
         except asyncio.TimeoutError:
@@ -116,6 +121,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 await self.async_set_unique_id(self._host)
                 self._abort_if_unique_id_configured()
 
+                _LOGGER.info("Configured OpenEPaperLink host %s", self._host)
                 return self.async_create_entry(
                     title=info["title"],
                     data={CONF_HOST: self._host}
@@ -172,6 +178,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         data={**entry.data, CONF_HOST: self._host},
                     )
                     await self.hass.config_entries.async_reload(entry.entry_id)
+                    _LOGGER.info("Reauthorized OpenEPaperLink host %s", self._host)
                     return self.async_abort(reason="reauth_successful")
 
             errors["base"] = error
@@ -181,6 +188,24 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={"host": self._host},
             errors=errors,
         )
+
+    async def async_step_import(self, import_data: dict[str, Any]):
+        """Handle import of a discovered AP."""
+        _LOGGER.debug("Importing discovered AP: %s", import_data)
+        host = import_data.get(CONF_HOST)
+        if not host:
+            return self.async_abort(reason="invalid_import")
+
+        info, error = await self._validate_input(host)
+        if error:
+            _LOGGER.warning("Failed to validate discovered AP %s: %s", host, error)
+            return self.async_abort(reason=error)
+
+        await self.async_set_unique_id(host)
+        self._abort_if_unique_id_configured()
+
+        _LOGGER.info("Automatically configured AP %s", host)
+        return self.async_create_entry(title=info["title"], data={CONF_HOST: host})
 
     @staticmethod
     @callback
@@ -225,6 +250,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         self._button_debounce = self.config_entry.options.get("button_debounce", 0.5)
         self._nfc_debounce = self.config_entry.options.get("nfc_debounce", 1.0)
         self._custom_font_dirs = self.config_entry.options.get("custom_font_dirs", "")
+        self._external_timeout = self.config_entry.options.get("external_timeout", DEFAULT_EXTERNAL_TIMEOUT)
 
     async def async_step_init(self, user_input=None):
         """Manage OpenEPaperLink options.
@@ -250,6 +276,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     "button_debounce": user_input.get("button_debounce", 0.5),
                     "nfc_debounce": user_input.get("nfc_debounce", 1.0),
                     "custom_font_dirs": user_input.get("custom_font_dirs", ""),
+                    "external_timeout": user_input.get("external_timeout", DEFAULT_EXTERNAL_TIMEOUT),
                 }
             )
 
@@ -313,6 +340,18 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     selector.TextSelectorConfig(
                         type=TextSelectorType.TEXT,
                         autocomplete="path"
+                    )
+                ),
+                vol.Optional(
+                    "external_timeout",
+                    default=self._external_timeout,
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.0,
+                        max=5.0,
+                        step=0.1,
+                        unit_of_measurement="s",
+                        mode=selector.NumberSelectorMode.SLIDER,
                     )
                 ),
             }),

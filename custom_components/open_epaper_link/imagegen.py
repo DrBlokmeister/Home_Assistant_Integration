@@ -20,7 +20,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.network import get_url
 from .const import DOMAIN, SIGNAL_TAG_IMAGE_UPDATE
 from .tag_types import TagType, get_tag_types_manager
-from .util import get_image_path
+from .util import get_image_path, get_hub_for_tag
 from PIL import Image, ImageDraw, ImageFont
 from resizeimage import resizeimage
 from homeassistant.exceptions import HomeAssistantError
@@ -628,19 +628,18 @@ class ImageGen:
         """
 
         try:
-            # Get hub instance
+            # Get tag MAC and corresponding hub
             if DOMAIN not in self.hass.data or not self.hass.data[DOMAIN]:
                 raise HomeAssistantError("OpenEPaperLink integration not properly configured")
 
-            hub = next(iter(self.hass.data[DOMAIN].values()))
-            if not hub.online:
-                raise HomeAssistantError("OpenEPaperLink AP is offline")
-
-            # Get tag MAC from entity ID
             try:
                 tag_mac = entity_id.split(".")[1].upper()
             except IndexError:
                 raise HomeAssistantError(f"Invalid entity ID format: {entity_id}")
+
+            hub = get_hub_for_tag(self.hass, tag_mac)
+            if not hub.online:
+                raise HomeAssistantError("OpenEPaperLink AP is offline")
 
             # First check if tag is known to the hub
             if tag_mac not in hub.tags:
@@ -1993,7 +1992,8 @@ class ImageGen:
             if element['url'].startswith(('http://', 'https://')):
                 # Download web image
                 response = await self.hass.async_add_executor_job(
-                    requests.get, element['url'])
+                    requests.get, element['url'], timeout=10
+                )
                 if response.status_code != 200:
                     raise HomeAssistantError(f"Failed to download image: HTTP {response.status_code}")
                 source_img = Image.open(io.BytesIO(response.content))

@@ -8,7 +8,7 @@ import aiohttp
 import async_timeout
 import websockets
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP, CONF_HOST
 from homeassistant.core import HomeAssistant, CALLBACK_TYPE, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -20,8 +20,16 @@ import logging
 
 _LOGGER: Final = logging.getLogger(__name__)
 
-from .const import DOMAIN, SIGNAL_AP_UPDATE, SIGNAL_TAG_UPDATE, SIGNAL_TAG_IMAGE_UPDATE
+from .const import (
+    DOMAIN,
+    SIGNAL_AP_UPDATE,
+    SIGNAL_TAG_UPDATE,
+    SIGNAL_TAG_IMAGE_UPDATE,
+    DEFAULT_EXTERNAL_TIMEOUT,
+    DATA_DISCOVERED_HOSTS,
+)
 from .tag_types import get_tag_types_manager, get_hw_string
+from .services import UploadQueueHandler
 
 STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}_tags"
@@ -95,6 +103,19 @@ class Hub:
         self.ap_env = None
         self.ap_model = "ESP32"
 
+        # Queue for image uploads
+        self.upload_queue = UploadQueueHandler(max_concurrent=1, cooldown=1.0)
+
+        # Track last update per tag for external update filtering
+        self._last_tag_updates: Dict[str, tuple[datetime, bool]] = {}
+
+        # Timeout before accepting external updates
+        external_timeout = entry.options.get("external_timeout", DEFAULT_EXTERNAL_TIMEOUT)
+        self._external_update_timeout = timedelta(seconds=external_timeout)
+
+        # Device identifier for this AP
+        self._ap_identifier = f"ap_{self.entry.entry_id}"
+
         self._unsub_callbacks: list[CALLBACK_TYPE] = []
         self.online = False
         self._reconnect_task: asyncio.Task | None = None
@@ -106,6 +127,26 @@ class Hub:
         self._nfc_last_scan: Dict[str, datetime] = {}
         self._nfc_debounce_interval = timedelta(seconds=1)
         self._update_debounce_interval()
+
+        # Apply external update timeout from options
+        self._update_external_timeout()
+
+        _LOGGER.info("Initialized hub for %s", self.host)
+
+    @property
+    def ap_device_identifier(self) -> tuple[str, str]:
+        """Return the device identifier tuple for this AP."""
+        return (DOMAIN, self._ap_identifier)
+
+    @property
+    def ap_device_info(self) -> dict:
+        """Return basic device info dictionary for this AP."""
+        return {
+            "identifiers": {self.ap_device_identifier},
+            "name": "OpenEPaperLink AP",
+            "model": self.ap_model,
+            "manufacturer": "OpenEPaperLink",
+        }
 
     def _update_debounce_interval(self) -> None:
         """Update event debounce intervals from integration options.
@@ -122,6 +163,13 @@ class Hub:
         self._button_debounce_interval = timedelta(seconds=button_debounce_seconds)
         self._nfc_debounce_interval = timedelta(seconds=nfc_debounce_seconds)
 
+    def _update_external_timeout(self) -> None:
+        """Update external update timeout from options."""
+        timeout_seconds = self.entry.options.get(
+            "external_timeout", DEFAULT_EXTERNAL_TIMEOUT
+        )
+        self._external_update_timeout = timedelta(seconds=timeout_seconds)
+
     async def async_reload_config(self) -> None:
         """Reload configuration from config entry.
 
@@ -135,6 +183,7 @@ class Hub:
         """
         await self.async_reload_blacklist()
         self._update_debounce_interval()
+        self._update_external_timeout()
 
     async def async_setup_initial(self) -> bool:
         """Set up hub without establishing a WebSocket connection.
@@ -200,6 +249,8 @@ class Hub:
         Returns:
             bool: True if connection was successfully established, False otherwise
         """
+        _LOGGER.debug("Starting WebSocket for %s", self.host)
+
         if self._ws_task and not self._ws_task.done():
             self._ws_task.cancel()
             try:
@@ -313,6 +364,7 @@ class Hub:
         while not self._shutdown.is_set():
             try:
                 ws_url = f"ws://{self.host}/ws"
+                _LOGGER.debug("Connecting to %s", ws_url)
                 async with self._session.ws_connect(ws_url, heartbeat=30) as ws:
                     self.online = True
                     _LOGGER.debug("Connected to websocket at %s", ws_url)
@@ -347,7 +399,7 @@ class Hub:
                 raise
             except aiohttp.ClientError as err:
                 self.online = False
-                _LOGGER.error("WebSocket connection error: %s", err)
+                _LOGGER.warning("WebSocket connection error: %s", err)
                 async_dispatcher_send(self.hass, f"{DOMAIN}_connection_status", False)
             except Exception as err:
                 self.online = False
@@ -365,6 +417,8 @@ class Hub:
         If a reconnection task is already scheduled, it's cancelled first
         to avoid multiple concurrent reconnection attempts.
         """
+        _LOGGER.debug("Scheduling reconnect to %s", self.host)
+
         async def reconnect():
             await asyncio.sleep(RECONNECT_INTERVAL)
             if not self._shutdown.is_set():
@@ -552,6 +606,35 @@ class Hub:
                     # Notify of update
                     async_dispatcher_send(self.hass, f"{SIGNAL_TAG_IMAGE_UPDATE}_{tag_mac}", True)
 
+    async def _trigger_hub_discovery(self, host: str) -> None:
+        """Start config flow for a newly discovered hub.
+
+        This helper runs the import flow for ``host`` and immediately sets up
+        the created config entry so the new hub connects without requiring a
+        Home Assistant restart.
+        """
+        _LOGGER.info("Starting discovery flow for AP %s", host)
+        try:
+            result = await self.hass.config_entries.flow.async_init(
+                DOMAIN,
+                context={"source": "import"},
+                data={CONF_HOST: host},
+            )
+            if result.get("type") == "create_entry":
+                entry = result.get("result")
+                if entry:
+                    _LOGGER.info(
+                        "Discovered AP %s created config entry %s", host, entry.entry_id
+                    )
+                    await self.hass.config_entries.async_setup(entry.entry_id)
+                    await self.hass.async_block_till_done()
+            else:
+                _LOGGER.warning(
+                    "Discovery flow for %s returned unexpected result: %s", host, result
+                )
+        except Exception as err:
+            _LOGGER.warning("Failed to start discovery flow for %s: %s", host, err)
+
     async def _process_tag_data(self, tag_mac: str, tag_data: dict, is_initial_load: bool = False) -> bool:
         """Process tag data and update internal state.
 
@@ -610,6 +693,52 @@ class Hub:
         channel = tag_data.get("ch")
         version = tag_data.get("ver")
         update_count = tag_data.get("updatecount")
+        # Get AP address the tag reports. Older firmware used "ap" or
+        # "ap_ip", newer versions use "apip". Normalise 0.0.0.0 to the
+        # current hub host so routing works correctly when tags are
+        # connected locally.
+        ap_ip = (
+            tag_data.get("apip")
+            or tag_data.get("ap")
+            or tag_data.get("ap_ip")
+        )
+        if not ap_ip or ap_ip == "0.0.0.0":
+            ap_ip = self.host
+
+        prev_ip = existing_data.get("ap_ip")
+        if prev_ip and prev_ip != ap_ip:
+            _LOGGER.debug("Tag %s moved from %s to %s", tag_mac, prev_ip, ap_ip)
+
+        # Log when a tag reports an AP we don't manage and trigger discovery
+        if ap_ip != self.host and DOMAIN in self.hass.data:
+            hubs = self.hass.data[DOMAIN]
+            if not any(h.host == ap_ip for h in hubs.values()):
+                discovered = self.hass.data.setdefault(DATA_DISCOVERED_HOSTS, set())
+                if ap_ip not in discovered:
+                    _LOGGER.info(
+                        "Tag %s reported unknown AP %s", tag_mac, ap_ip
+                    )
+                    discovered.add(ap_ip)
+                    self.hass.async_create_task(
+                        self._trigger_hub_discovery(ap_ip)
+                    )
+                else:
+                    _LOGGER.debug(
+                        "AP %s already discovered, waiting for setup", ap_ip
+                    )
+
+        # Decide whether to accept this update when multiple APs report
+        now = datetime.utcnow()
+        is_local = not is_external and ap_ip == self.host
+        last_info = self._last_tag_updates.get(tag_mac)
+        if last_info:
+            last_time, last_local = last_info
+            if not is_local and last_local:
+                if now - last_time <= self._external_update_timeout:
+                    _LOGGER.debug(
+                        "Ignoring external update for %s from %s", tag_mac, ap_ip
+                    )
+                    return False
 
         # Check if name has changed
         old_name = existing_data.get("tag_name")
@@ -678,7 +807,11 @@ class Hub:
             "boot_count": boot_count,
             "checkin_count": checkin_count,
             "block_requests": block_requests,
+            "ap_ip": ap_ip,
         }
+
+        # Store timestamp and locality for conflict resolution
+        self._last_tag_updates[tag_mac] = (now, is_local)
 
         # Handle new tag discovery
         if is_new_tag:

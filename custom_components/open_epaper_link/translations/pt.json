@@ -17,7 +17,8 @@
           "blacklisted_tags": "Etiquetas na Lista Negra",
           "button_debounce": "Tempo de Debounce do Botão (segundos)",
           "nfc_debounce": "Tempo de Debounce NFC (segundos)",
-          "custom_font_dirs": "Diretórios de Fontes Personalizadas"
+          "custom_font_dirs": "Diretórios de Fontes Personalizadas",
+          "external_timeout": "Tempo limite de atualização externa (segundos)"
         }
       }
     }
@@ -150,6 +151,9 @@
       "rssi": {
         "name": "RSSI"
       },
+      "ap_ip": {
+        "name": "AP Conectado"
+      },
       "pending_updates": {
         "name": "Atualizações Pendentes"
       },
@@ -214,3 +218,4 @@
     }
   }
 }
+

@@ -5,7 +5,30 @@ import requests
 import logging
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.exceptions import HomeAssistantError
+
 _LOGGER = logging.getLogger(__name__)
+
+
+def get_hub_for_tag(hass: HomeAssistant, mac: str):
+    """Return the Hub instance responsible for a tag."""
+    mac = mac.upper()
+    for hub in hass.data.get(DOMAIN, {}).values():
+        tag_data = hub.get_tag_data(mac)
+        if tag_data:
+            ap_ip = tag_data.get("ap_ip")
+            if ap_ip == hub.host:
+                _LOGGER.debug("Using hub %s for tag %s", hub.host, mac)
+                return hub
+
+    # Fallback to the first hub if none matched
+    if hass.data.get(DOMAIN):
+        fallback = next(iter(hass.data[DOMAIN].values()))
+        _LOGGER.debug("Falling back to first hub %s for tag %s", fallback.host, mac)
+        return fallback
+
+    _LOGGER.warning("No hubs configured when looking up tag %s", mac)
+    raise HomeAssistantError("Integration not configured")
 
 def get_image_folder(hass: HomeAssistant) -> str:
     """Return the folder where images are stored.
@@ -60,15 +83,13 @@ async def send_tag_cmd(hass: HomeAssistant, entity_id: str, cmd: str) -> bool:
     Raises:
         HomeAssistantError: If the AP is offline or entity_id is invalid
     """
-    # Get the hub from the entity_id's domain
-    entry_id = list(hass.data[DOMAIN].keys())[0]  # Get the first (and should be only) entry
-    hub = hass.data[DOMAIN][entry_id]
+    mac = entity_id.split(".")[1].upper()
+    hub = get_hub_for_tag(hass, mac)
 
     if not hub.online:
         _LOGGER.error("Cannot send command: AP is offline")
         return False
 
-    mac = entity_id.split(".")[1].upper()
     url = f"http://{hub.host}/tag_cmd"
 
     data = {
@@ -76,17 +97,24 @@ async def send_tag_cmd(hass: HomeAssistant, entity_id: str, cmd: str) -> bool:
         'cmd': cmd
     }
 
+    _LOGGER.debug("Sending %s command to %s via %s", cmd, mac, hub.host)
+
     try:
-        result = await hass.async_add_executor_job(lambda: requests.post(url, data=data))
+        result = await hass.async_add_executor_job(
+            lambda: requests.post(url, data=data, timeout=10)
+        )
         if result.status_code == 200:
             _LOGGER.info("Sent %s command to %s", cmd, entity_id)
             return True
-        else:
-            _LOGGER.error("Failed to send %s command to %s: HTTP %s", cmd, entity_id, result.status_code)
-            return False
+        _LOGGER.error(
+            "Failed to send %s command to %s: HTTP %s", cmd, entity_id, result.status_code
+        )
+        return False
+    except requests.Timeout as err:
+        raise HomeAssistantError(f"Timeout sending {cmd} to {entity_id}: {err}") from err
     except Exception as e:
         _LOGGER.error("Failed to send %s command to %s: %s", cmd, entity_id, str(e))
-        return False
+        raise HomeAssistantError(f"Failed to send {cmd} to {entity_id}: {e}") from e
 
 async def reboot_ap(hass: HomeAssistant) -> bool:
     """Reboot the ESL Access Point.
@@ -104,27 +132,38 @@ async def reboot_ap(hass: HomeAssistant) -> bool:
     Raises:
         HomeAssistantError: If the AP is offline or cannot be reached
     """
-    # Get the hub instance
-    entry_id = list(hass.data[DOMAIN].keys())[0]  # Get the first (and should be only) entry
-    hub = hass.data[DOMAIN][entry_id]
+    if DOMAIN not in hass.data or not hass.data[DOMAIN]:
+        raise HomeAssistantError("Integration not configured")
 
-    if not hub.online:
-        _LOGGER.error("Cannot reboot AP: AP is offline")
-        return False
+    for hub in hass.data[DOMAIN].values():
+        _LOGGER.info("Sending reboot command to AP at %s", hub.host)
+        if not hub.online:
+            _LOGGER.error("Cannot reboot AP at %s: AP is offline", hub.host)
+            continue
 
-    url = f"http://{hub.host}/reboot"
+        url = f"http://{hub.host}/reboot"
 
-    try:
-        result = await hass.async_add_executor_job(lambda: requests.post(url))
-        if result.status_code == 200:
-            _LOGGER.info("Rebooted OEPL Access Point")
-            return True
-        else:
-            _LOGGER.error("Failed to reboot OEPL Access Point: HTTP %s", result.status_code)
-            return False
-    except Exception as e:
-        _LOGGER.error("Failed to reboot OEPL Access Point: %s", str(e))
-        return False
+        try:
+            result = await hass.async_add_executor_job(
+                lambda: requests.post(url, timeout=10)
+            )
+            if result.status_code == 200:
+                _LOGGER.info("Rebooted OEPL Access Point at %s", hub.host)
+            else:
+                _LOGGER.error(
+                    "Failed to reboot OEPL Access Point at %s: HTTP %s",
+                    hub.host,
+                    result.status_code,
+                )
+        except requests.Timeout as err:
+            raise HomeAssistantError(
+                f"Timeout rebooting OEPL Access Point at {hub.host}: {err}"
+            ) from err
+        except Exception as e:
+            _LOGGER.error("Failed to reboot OEPL Access Point at %s: %s", hub.host, str(e))
+            raise HomeAssistantError(f"Failed to reboot AP at {hub.host}: {e}") from e
+
+    return True
 
 async def set_ap_config_item(hub, key: str, value: str | int) -> bool:
     """Set a configuration item on the Access Point.
@@ -163,7 +202,9 @@ async def set_ap_config_item(hub, key: str, value: str | int) -> bool:
     _LOGGER.debug("Setting AP config %s = %s", key, value)
     try:
         response = await hub.hass.async_add_executor_job(
-            lambda: requests.post(f"http://{hub.host}/save_apcfg", data=data)
+            lambda: requests.post(
+                f"http://{hub.host}/save_apcfg", data=data, timeout=10
+            )
         )
         if response.status_code == 200:
             # Update local cache immediately to prevent race conditions
@@ -174,6 +215,10 @@ async def set_ap_config_item(hub, key: str, value: str | int) -> bool:
         else:
             _LOGGER.error("Failed to set AP config %s: HTTP %s", key, response.status_code)
             return False
+    except requests.Timeout as err:
+        raise HomeAssistantError(
+            f"Timeout setting {key} on {hub.host}: {err}"
+        ) from err
     except Exception as e:
         _LOGGER.error("Failed to set AP config %s: %s", key, str(e))
-        return False
+        raise HomeAssistantError(f"Failed to set {key} on {hub.host}: {e}") from e
