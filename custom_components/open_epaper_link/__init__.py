@@ -5,7 +5,7 @@ from typing import Final
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform, EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import HomeAssistant
-from .const import DOMAIN, DEFAULT_LOG_LEVEL
+from .const import DOMAIN, DEFAULT_LOG_LEVEL, DATA_DISCOVERED_HOSTS
 import os
 
 if os.environ.get("OEPL_NO_INIT"):
@@ -47,6 +47,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         bool: True if setup was successful, False otherwise
     """
     hub = Hub(hass, entry)
+    hass.data.setdefault(DATA_DISCOVERED_HOSTS, set())
     _LOGGER.info("Setting up OpenEPaperLink entry %s for %s", entry.entry_id, entry.data.get("host"))
 
     # Apply configured log level

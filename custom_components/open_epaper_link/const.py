@@ -18,3 +18,6 @@ LOG_LEVELS = [
     "notset",
 ]
 DEFAULT_LOG_LEVEL = "info"
+
+# Track APs discovered automatically from tag updates
+DATA_DISCOVERED_HOSTS = f"{DOMAIN}_discovered_hosts"

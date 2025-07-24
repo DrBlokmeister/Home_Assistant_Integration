@@ -82,7 +82,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             session = async_get_clientsession(self.hass)
             async with asyncio.timeout(10):
                 async with session.get(f"http://{host}") as response:
-                    if response.status != 200:
+                    if response.status >= 400:
                         errors["base"] = "cannot_connect"
                     else:
                         self._host = host
@@ -193,12 +193,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_import(self, import_data: dict[str, Any]):
         """Handle import of a discovered AP."""
+        _LOGGER.debug("Importing discovered AP: %s", import_data)
         host = import_data.get(CONF_HOST)
         if not host:
             return self.async_abort(reason="invalid_import")
 
         info, error = await self._validate_input(host)
         if error:
+            _LOGGER.warning("Failed to validate discovered AP %s: %s", host, error)
             return self.async_abort(reason=error)
 
         await self.async_set_unique_id(host)

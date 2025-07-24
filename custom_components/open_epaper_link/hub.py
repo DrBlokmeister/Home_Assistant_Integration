@@ -26,6 +26,7 @@ from .const import (
     SIGNAL_TAG_UPDATE,
     SIGNAL_TAG_IMAGE_UPDATE,
     DEFAULT_EXTERNAL_TIMEOUT,
+    DATA_DISCOVERED_HOSTS,
 )
 from .tag_types import get_tag_types_manager, get_hw_string
 from .services import UploadQueueHandler
@@ -683,16 +684,23 @@ class Hub:
         if ap_ip != self.host and DOMAIN in self.hass.data:
             hubs = self.hass.data[DOMAIN]
             if not any(h.host == ap_ip for h in hubs.values()):
-                _LOGGER.info(
-                    "Tag %s reported unknown AP %s", tag_mac, ap_ip
-                )
-                self.hass.async_create_task(
-                    self.hass.config_entries.flow.async_init(
-                        DOMAIN,
-                        context={"source": "import"},
-                        data={CONF_HOST: ap_ip},
+                discovered = self.hass.data.setdefault(DATA_DISCOVERED_HOSTS, set())
+                if ap_ip not in discovered:
+                    _LOGGER.info(
+                        "Tag %s reported unknown AP %s", tag_mac, ap_ip
                     )
-                )
+                    discovered.add(ap_ip)
+                    self.hass.async_create_task(
+                        self.hass.config_entries.flow.async_init(
+                            DOMAIN,
+                            context={"source": "import"},
+                            data={CONF_HOST: ap_ip},
+                        )
+                    )
+                else:
+                    _LOGGER.debug(
+                        "AP %s already discovered, waiting for setup", ap_ip
+                    )
 
         # Decide whether to accept this update when multiple APs report
         now = datetime.utcnow()
