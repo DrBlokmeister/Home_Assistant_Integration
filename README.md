@@ -114,7 +114,7 @@ After setup, you can configure additional options through the integration's opti
 Tags are automatically discovered when they check in with your AP. New tags will appear as devices with their MAC address as the identifier or alias if available. You can rename these in the device settings.
 
 #### Multi-AP Support
-The integration maintains a single configuration entry while handling multiple APs.  When a tag reports a new AP address the integration automatically adds another device and establishes a WebSocket connection to that AP.  No additional setup is required.  Commands and image uploads are routed to the AP that last reported the tag based on the stored `apip` value.
+The integration maintains a single configuration entry while handling multiple APs.  When a tag reports a new AP address the integration automatically adds another device and establishes a WebSocket connection to that AP.  Each AP appears as its own device in Home Assistant so you can manage its settings individually.  No additional setup is required.  Commands and image uploads are routed to the AP that last reported the tag based on the stored `apip` value.
 
 #### Duplicate Updates
 When multiple APs report the same tag, updates from the AP where `isexternal` is `False` are preferred. External updates are accepted only if the direct AP remains silent for a short, configurable timeout (**External Update Timeout**). The integration stores the last known `apip` per tag to route future uploads and commands.
