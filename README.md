@@ -115,6 +115,7 @@ Tags are automatically discovered when they check in with your AP. New tags will
 
 #### Multi-AP Support
 Configure multiple OpenEPaperLink hosts by adding additional integration entries. Each AP creates its own device with configuration entities. Commands and image uploads are automatically routed to the AP that last reported the tag based on the stored `apip` value.
+New APs detected from tag updates are automatically configured and start a WebSocket connection so their devices appear without manual setup.
 
 #### Duplicate Updates
 When multiple APs report the same tag, updates from the AP where `isexternal` is `False` are preferred. External updates are accepted only if the direct AP remains silent for a short, configurable timeout (**External Update Timeout**). The integration stores the last known `apip` per tag to route future uploads and commands.

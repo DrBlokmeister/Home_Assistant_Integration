@@ -29,6 +29,7 @@ This document describes how the integration handles multiple OpenEPaperLink Acce
    - [x] Instantiate an `UploadQueueHandler` per hub tied to the Home Assistant lifecycle.
 6. **Configuration**
    - [x] Allow multiple AP hosts to be configured through additional entries.
+   - [x] Automatically discover new APs from tag updates.
 7. **Entities**
    - [x] Maintain a single entity per tag and update its `apip` when roaming.
 8. **HTTP Request Timeouts**

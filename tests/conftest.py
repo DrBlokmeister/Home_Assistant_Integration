@@ -82,5 +82,6 @@ EVENT_HOMEASSISTANT_STOP = 'ha_stop'
 const.Platform = Platform
 const.EVENT_HOMEASSISTANT_STARTED = EVENT_HOMEASSISTANT_STARTED
 const.EVENT_HOMEASSISTANT_STOP = EVENT_HOMEASSISTANT_STOP
+const.CONF_HOST = 'host'
 ha.const = const
 sys.modules.setdefault('homeassistant.const', const)

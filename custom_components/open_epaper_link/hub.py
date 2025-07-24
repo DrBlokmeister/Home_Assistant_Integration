@@ -8,7 +8,7 @@ import aiohttp
 import async_timeout
 import websockets
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP, CONF_HOST
 from homeassistant.core import HomeAssistant, CALLBACK_TYPE, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -671,12 +671,19 @@ class Hub:
         if prev_ip and prev_ip != ap_ip:
             _LOGGER.debug("Tag %s moved from %s to %s", tag_mac, prev_ip, ap_ip)
 
-        # Log when a tag reports an AP we don't manage
+        # Log when a tag reports an AP we don't manage and trigger discovery
         if ap_ip != self.host and DOMAIN in self.hass.data:
             hubs = self.hass.data[DOMAIN]
             if not any(h.host == ap_ip for h in hubs.values()):
                 _LOGGER.info(
                     "Tag %s reported unknown AP %s", tag_mac, ap_ip
+                )
+                self.hass.async_create_task(
+                    self.hass.config_entries.flow.async_init(
+                        DOMAIN,
+                        context={"source": "import"},
+                        data={CONF_HOST: ap_ip},
+                    )
                 )
 
         # Decide whether to accept this update when multiple APs report

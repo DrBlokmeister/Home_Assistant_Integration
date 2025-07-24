@@ -152,6 +152,9 @@
             "rssi": {
                 "name": "RSSI"
             },
+            "ap_ip": {
+                "name": "Connected AP"
+            },
             "pending_updates": {
                 "name": "Pending Updates"
             },

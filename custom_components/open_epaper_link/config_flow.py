@@ -191,6 +191,22 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    async def async_step_import(self, import_data: dict[str, Any]):
+        """Handle import of a discovered AP."""
+        host = import_data.get(CONF_HOST)
+        if not host:
+            return self.async_abort(reason="invalid_import")
+
+        info, error = await self._validate_input(host)
+        if error:
+            return self.async_abort(reason=error)
+
+        await self.async_set_unique_id(host)
+        self._abort_if_unique_id_configured()
+
+        _LOGGER.info("Automatically configured AP %s", host)
+        return self.async_create_entry(title=info["title"], data={CONF_HOST: host})
+
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:

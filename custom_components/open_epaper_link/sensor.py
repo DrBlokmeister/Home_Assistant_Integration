@@ -283,6 +283,13 @@ TAG_SENSOR_TYPES: tuple[OpenEPaperLinkSensorEntityDescription, ...] = (
         icon="mdi:signal-distance-variant",
     ),
     OpenEPaperLinkSensorEntityDescription(
+        key="ap_ip",
+        name="Connected AP",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda data: data.get("ap_ip"),
+        icon="mdi:access-point-network",
+    ),
+    OpenEPaperLinkSensorEntityDescription(
         key="pending_updates",
         name="Pending Updates",
         state_class=SensorStateClass.MEASUREMENT,

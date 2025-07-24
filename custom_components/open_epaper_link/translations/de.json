@@ -195,6 +195,9 @@
             "rssi": {
                 "name": "Signalstärke (RSSI)"
             },
+            "ap_ip": {
+                "name": "Verbundenes AP"
+            },
             "pending_updates": {
                 "name": "Ausstehende Updates"
             },
