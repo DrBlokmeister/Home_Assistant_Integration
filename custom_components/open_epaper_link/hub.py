@@ -130,6 +130,8 @@ class Hub:
         # Apply external update timeout from options
         self._update_external_timeout()
 
+        _LOGGER.info("Initialized hub for %s", self.host)
+
     @property
     def ap_device_identifier(self) -> tuple[str, str]:
         """Return the device identifier tuple for this AP."""

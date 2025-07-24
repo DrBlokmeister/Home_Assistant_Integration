@@ -107,6 +107,9 @@ After setup, you can configure additional options through the integration's opti
 - **Button Debounce Time**: Adjust sensitivity of button triggers (0.0-5.0 seconds)
 - **NFC Debounce Time**: Adjust sensitivity of NFC triggers (0.0-5.0 seconds)
 
+#### Logging
+- **Log Level**: Control how much information is written to the log. Use `debug` for detailed troubleshooting.
+
 #### Tag Discovery
 Tags are automatically discovered when they check in with your AP. New tags will appear as devices with their MAC address as the identifier or alias if available. You can rename these in the device settings.
 

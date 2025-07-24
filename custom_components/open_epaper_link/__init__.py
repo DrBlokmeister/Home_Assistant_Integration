@@ -5,7 +5,7 @@ from typing import Final
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform, EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import HomeAssistant
-from .const import DOMAIN
+from .const import DOMAIN, DEFAULT_LOG_LEVEL
 import os
 
 if os.environ.get("OEPL_NO_INIT"):
@@ -47,6 +47,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         bool: True if setup was successful, False otherwise
     """
     hub = Hub(hass, entry)
+
+    # Apply configured log level
+    log_level_str = entry.options.get("log_level", DEFAULT_LOG_LEVEL)
+    level = getattr(logging, log_level_str.upper(), logging.INFO)
+    _LOGGER.setLevel(level)
+    _LOGGER.info("Set log level to %s", log_level_str)
 
     # Do basic setup without WebSocket connection
     if not await hub.async_setup_initial():
@@ -99,6 +105,10 @@ async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """
     hub = hass.data[DOMAIN][entry.entry_id]
     await hub.async_reload_config()
+    log_level_str = entry.options.get("log_level", DEFAULT_LOG_LEVEL)
+    level = getattr(logging, log_level_str.upper(), logging.INFO)
+    _LOGGER.setLevel(level)
+    _LOGGER.info("Updated log level to %s", log_level_str)
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload the integration when removed or restarted.

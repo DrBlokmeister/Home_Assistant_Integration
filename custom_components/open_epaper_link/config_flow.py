@@ -17,7 +17,12 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.selector import Selector, TextSelectorType
 
-from .const import DOMAIN, DEFAULT_EXTERNAL_TIMEOUT
+from .const import (
+    DOMAIN,
+    DEFAULT_EXTERNAL_TIMEOUT,
+    DEFAULT_LOG_LEVEL,
+    LOG_LEVELS,
+)
 import logging
 
 _LOGGER: Final = logging.getLogger(__name__)
@@ -226,6 +231,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         self._nfc_debounce = self.config_entry.options.get("nfc_debounce", 1.0)
         self._custom_font_dirs = self.config_entry.options.get("custom_font_dirs", "")
         self._external_timeout = self.config_entry.options.get("external_timeout", DEFAULT_EXTERNAL_TIMEOUT)
+        self._log_level = self.config_entry.options.get("log_level", DEFAULT_LOG_LEVEL)
 
     async def async_step_init(self, user_input=None):
         """Manage OpenEPaperLink options.
@@ -252,6 +258,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     "nfc_debounce": user_input.get("nfc_debounce", 1.0),
                     "custom_font_dirs": user_input.get("custom_font_dirs", ""),
                     "external_timeout": user_input.get("external_timeout", DEFAULT_EXTERNAL_TIMEOUT),
+                    "log_level": user_input.get("log_level", DEFAULT_LOG_LEVEL),
                 }
             )
 
@@ -327,6 +334,19 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         step=0.1,
                         unit_of_measurement="s",
                         mode=selector.NumberSelectorMode.SLIDER,
+                    )
+                ),
+                vol.Optional(
+                    "log_level",
+                    default=self._log_level,
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[
+                            selector.SelectOptionDict(value=level, label=level.upper())
+                            for level in LOG_LEVELS
+                        ],
+                        multiple=False,
+                        mode=selector.SelectSelectorMode.DROPDOWN,
                     )
                 ),
             }),
