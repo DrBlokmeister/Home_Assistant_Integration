@@ -47,6 +47,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         bool: True if setup was successful, False otherwise
     """
     hub = Hub(hass, entry)
+    _LOGGER.info("Setting up OpenEPaperLink entry %s for %s", entry.entry_id, entry.data.get("host"))
 
     # Apply configured log level
     log_level_str = entry.options.get("log_level", DEFAULT_LOG_LEVEL)
@@ -59,6 +60,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return False
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = hub
+    _LOGGER.debug("Stored hub for host %s", hub.host)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -104,6 +106,8 @@ async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
         entry: Updated configuration entry
     """
     hub = hass.data[DOMAIN][entry.entry_id]
+    _LOGGER.info("Unloading OpenEPaperLink entry %s for %s", entry.entry_id, hub.host)
+    _LOGGER.debug("Reloading options for hub %s", hub.host)
     await hub.async_reload_config()
     log_level_str = entry.options.get("log_level", DEFAULT_LOG_LEVEL)
     level = getattr(logging, log_level_str.upper(), logging.INFO)
@@ -148,6 +152,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         hass: Home Assistant instance
         entry: Configuration entry being removed
     """
+    _LOGGER.info("Removing OpenEPaperLink entry %s", entry.entry_id)
     await async_remove_storage_files(hass)
 
 async def async_remove_storage_files(hass: HomeAssistant) -> None:
@@ -166,6 +171,7 @@ async def async_remove_storage_files(hass: HomeAssistant) -> None:
         hass: Home Assistant instance
     """
 
+    _LOGGER.debug("Cleaning up storage files")
     # Remove tag types file
     tag_types_file = hass.config.path("open_epaper_link_tagtypes.json")
     if await hass.async_add_executor_job(os.path.exists, tag_types_file):

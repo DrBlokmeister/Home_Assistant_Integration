@@ -433,6 +433,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                     raise HomeAssistantError(
                         f"Image upload failed for {entity_id} with status code: {response.status_code}"
                     )
+                _LOGGER.info("Uploaded image to %s via %s", entity_id, hub.host)
                 break
 
             except asyncio.TimeoutError:

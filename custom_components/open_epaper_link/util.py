@@ -97,6 +97,8 @@ async def send_tag_cmd(hass: HomeAssistant, entity_id: str, cmd: str) -> bool:
         'cmd': cmd
     }
 
+    _LOGGER.debug("Sending %s command to %s via %s", cmd, mac, hub.host)
+
     try:
         result = await hass.async_add_executor_job(
             lambda: requests.post(url, data=data, timeout=10)
@@ -134,6 +136,7 @@ async def reboot_ap(hass: HomeAssistant) -> bool:
         raise HomeAssistantError("Integration not configured")
 
     for hub in hass.data[DOMAIN].values():
+        _LOGGER.info("Sending reboot command to AP at %s", hub.host)
         if not hub.online:
             _LOGGER.error("Cannot reboot AP at %s: AP is offline", hub.host)
             continue

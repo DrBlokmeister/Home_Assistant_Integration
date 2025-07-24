@@ -76,6 +76,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Remove any trailing slashes
         host = host.rstrip("/")
 
+        _LOGGER.debug("Validating OpenEPaperLink host %s", host)
+
         try:
             session = async_get_clientsession(self.hass)
             async with asyncio.timeout(10):
@@ -83,8 +85,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     if response.status != 200:
                         errors["base"] = "cannot_connect"
                     else:
-                        # Store version info for later display
                         self._host = host
+                        _LOGGER.debug("Validated host %s", host)
                         return {"title": f"OpenEPaperLink AP ({host})"}, None
 
         except asyncio.TimeoutError:
@@ -121,6 +123,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 await self.async_set_unique_id(self._host)
                 self._abort_if_unique_id_configured()
 
+                _LOGGER.info("Configured OpenEPaperLink host %s", self._host)
                 return self.async_create_entry(
                     title=info["title"],
                     data={CONF_HOST: self._host}
@@ -177,6 +180,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         data={**entry.data, CONF_HOST: self._host},
                     )
                     await self.hass.config_entries.async_reload(entry.entry_id)
+                    _LOGGER.info("Reauthorized OpenEPaperLink host %s", self._host)
                     return self.async_abort(reason="reauth_successful")
 
             errors["base"] = error

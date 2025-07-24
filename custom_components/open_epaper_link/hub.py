@@ -248,6 +248,8 @@ class Hub:
         Returns:
             bool: True if connection was successfully established, False otherwise
         """
+        _LOGGER.debug("Starting WebSocket for %s", self.host)
+
         if self._ws_task and not self._ws_task.done():
             self._ws_task.cancel()
             try:
@@ -414,6 +416,8 @@ class Hub:
         If a reconnection task is already scheduled, it's cancelled first
         to avoid multiple concurrent reconnection attempts.
         """
+        _LOGGER.debug("Scheduling reconnect to %s", self.host)
+
         async def reconnect():
             await asyncio.sleep(RECONNECT_INTERVAL)
             if not self._shutdown.is_set():
@@ -662,6 +666,10 @@ class Hub:
         ap_ip = tag_data.get("ap") or tag_data.get("ap_ip")
         if not ap_ip or ap_ip == "0.0.0.0":
             ap_ip = self.host
+
+        prev_ip = existing_data.get("ap_ip")
+        if prev_ip and prev_ip != ap_ip:
+            _LOGGER.debug("Tag %s moved from %s to %s", tag_mac, prev_ip, ap_ip)
 
         # Log when a tag reports an AP we don't manage
         if ap_ip != self.host and DOMAIN in self.hass.data:
