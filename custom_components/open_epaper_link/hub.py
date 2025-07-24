@@ -607,13 +607,31 @@ class Hub:
                     async_dispatcher_send(self.hass, f"{SIGNAL_TAG_IMAGE_UPDATE}_{tag_mac}", True)
 
     async def _trigger_hub_discovery(self, host: str) -> None:
-        """Start config flow for a newly discovered hub."""
+        """Start config flow for a newly discovered hub.
+
+        This helper runs the import flow for ``host`` and immediately sets up
+        the created config entry so the new hub connects without requiring a
+        Home Assistant restart.
+        """
+        _LOGGER.info("Starting discovery flow for AP %s", host)
         try:
-            await self.hass.config_entries.flow.async_init(
+            result = await self.hass.config_entries.flow.async_init(
                 DOMAIN,
                 context={"source": "import"},
                 data={CONF_HOST: host},
             )
+            if result.get("type") == "create_entry":
+                entry = result.get("result")
+                if entry:
+                    _LOGGER.info(
+                        "Discovered AP %s created config entry %s", host, entry.entry_id
+                    )
+                    await self.hass.config_entries.async_setup(entry.entry_id)
+                    await self.hass.async_block_till_done()
+            else:
+                _LOGGER.warning(
+                    "Discovery flow for %s returned unexpected result: %s", host, result
+                )
         except Exception as err:
             _LOGGER.warning("Failed to start discovery flow for %s: %s", host, err)
 
