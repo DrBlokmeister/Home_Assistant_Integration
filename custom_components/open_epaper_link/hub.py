@@ -663,7 +663,15 @@ class Hub:
         channel = tag_data.get("ch")
         version = tag_data.get("ver")
         update_count = tag_data.get("updatecount")
-        ap_ip = tag_data.get("ap") or tag_data.get("ap_ip")
+        # Get AP address the tag reports. Older firmware used "ap" or
+        # "ap_ip", newer versions use "apip". Normalise 0.0.0.0 to the
+        # current hub host so routing works correctly when tags are
+        # connected locally.
+        ap_ip = (
+            tag_data.get("apip")
+            or tag_data.get("ap")
+            or tag_data.get("ap_ip")
+        )
         if not ap_ip or ap_ip == "0.0.0.0":
             ap_ip = self.host
 

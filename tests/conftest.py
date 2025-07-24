@@ -85,3 +85,52 @@ const.EVENT_HOMEASSISTANT_STOP = EVENT_HOMEASSISTANT_STOP
 const.CONF_HOST = 'host'
 ha.const = const
 sys.modules.setdefault('homeassistant.const', const)
+
+# Additional component stubs used by the integration during tests
+components = types.ModuleType('homeassistant.components')
+components.recorder = types.ModuleType('homeassistant.components.recorder')
+components.recorder.get_instance = lambda hass: None
+components.recorder.history = types.ModuleType('homeassistant.components.recorder.history')
+components.recorder.history.get_significant_states = lambda *a, **k: {}
+components.button = types.ModuleType('homeassistant.components.button')
+components.button.ButtonEntity = object
+components.camera = types.ModuleType('homeassistant.components.camera')
+components.camera.Camera = object
+components.sensor = types.ModuleType('homeassistant.components.sensor')
+components.sensor.SensorDeviceClass = object
+components.sensor.SensorStateClass = object
+components.sensor.SIGNAL_STRENGTH_DECIBELS = 'dB'
+components.switch = types.ModuleType('homeassistant.components.switch')
+components.switch.SwitchEntity = object
+components.select = types.ModuleType('homeassistant.components.select')
+components.select.SelectEntity = object
+components.text = types.ModuleType('homeassistant.components.text')
+components.text.TextEntity = object
+components.text.TextMode = object
+components.device_automation = types.ModuleType('homeassistant.components.device_automation')
+components.device_automation.DEVICE_TRIGGER_BASE_SCHEMA = object
+components.homeassistant = types.ModuleType('homeassistant.components.homeassistant')
+components.homeassistant.triggers = types.ModuleType('homeassistant.components.homeassistant.triggers')
+components.homeassistant.triggers.state = types.ModuleType('homeassistant.components.homeassistant.triggers.state')
+components.homeassistant.triggers.event = types.ModuleType('homeassistant.components.homeassistant.triggers.event')
+sys.modules.setdefault('homeassistant.components', components)
+sys.modules.setdefault('homeassistant.components.recorder', components.recorder)
+sys.modules.setdefault('homeassistant.components.recorder.history', components.recorder.history)
+sys.modules.setdefault('homeassistant.components.button', components.button)
+sys.modules.setdefault('homeassistant.components.camera', components.camera)
+sys.modules.setdefault('homeassistant.components.sensor', components.sensor)
+sys.modules.setdefault('homeassistant.components.switch', components.switch)
+sys.modules.setdefault('homeassistant.components.select', components.select)
+sys.modules.setdefault('homeassistant.components.text', components.text)
+sys.modules.setdefault('homeassistant.components.device_automation', components.device_automation)
+sys.modules.setdefault('homeassistant.components.homeassistant', components.homeassistant)
+sys.modules.setdefault('homeassistant.components.homeassistant.triggers', components.homeassistant.triggers)
+sys.modules.setdefault('homeassistant.components.homeassistant.triggers.state', components.homeassistant.triggers.state)
+sys.modules.setdefault('homeassistant.components.homeassistant.triggers.event', components.homeassistant.triggers.event)
+
+# util stubs used by image generation
+util = types.ModuleType('homeassistant.util')
+util.dt = types.ModuleType('homeassistant.util.dt')
+util.dt.utcnow = lambda: None
+sys.modules.setdefault('homeassistant.util', util)
+sys.modules.setdefault('homeassistant.util.dt', util.dt)
