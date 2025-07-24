@@ -606,6 +606,17 @@ class Hub:
                     # Notify of update
                     async_dispatcher_send(self.hass, f"{SIGNAL_TAG_IMAGE_UPDATE}_{tag_mac}", True)
 
+    async def _trigger_hub_discovery(self, host: str) -> None:
+        """Start config flow for a newly discovered hub."""
+        try:
+            await self.hass.config_entries.flow.async_init(
+                DOMAIN,
+                context={"source": "import"},
+                data={CONF_HOST: host},
+            )
+        except Exception as err:
+            _LOGGER.warning("Failed to start discovery flow for %s: %s", host, err)
+
     async def _process_tag_data(self, tag_mac: str, tag_data: dict, is_initial_load: bool = False) -> bool:
         """Process tag data and update internal state.
 
@@ -691,11 +702,7 @@ class Hub:
                     )
                     discovered.add(ap_ip)
                     self.hass.async_create_task(
-                        self.hass.config_entries.flow.async_init(
-                            DOMAIN,
-                            context={"source": "import"},
-                            data={CONF_HOST: ap_ip},
-                        )
+                        self._trigger_hub_discovery(ap_ip)
                     )
                 else:
                     _LOGGER.debug(
