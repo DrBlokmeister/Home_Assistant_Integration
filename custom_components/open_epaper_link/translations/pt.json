@@ -18,8 +18,7 @@
           "button_debounce": "Tempo de Debounce do Botão (segundos)",
           "nfc_debounce": "Tempo de Debounce NFC (segundos)",
           "custom_font_dirs": "Diretórios de Fontes Personalizadas",
-          "external_timeout": "Tempo limite de atualização externa (segundos)",
-          "log_level": "Nível de log"
+          "external_timeout": "Tempo limite de atualização externa (segundos)"
         }
       }
     }
