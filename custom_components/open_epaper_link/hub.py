@@ -361,6 +361,7 @@ class Hub:
         while not self._shutdown.is_set():
             try:
                 ws_url = f"ws://{self.host}/ws"
+                _LOGGER.debug("Connecting to %s", ws_url)
                 async with self._session.ws_connect(ws_url, heartbeat=30) as ws:
                     self.online = True
                     _LOGGER.debug("Connected to websocket at %s", ws_url)
@@ -395,7 +396,7 @@ class Hub:
                 raise
             except aiohttp.ClientError as err:
                 self.online = False
-                _LOGGER.error("WebSocket connection error: %s", err)
+                _LOGGER.warning("WebSocket connection error: %s", err)
                 async_dispatcher_send(self.hass, f"{DOMAIN}_connection_status", False)
             except Exception as err:
                 self.online = False
@@ -661,6 +662,14 @@ class Hub:
         ap_ip = tag_data.get("ap") or tag_data.get("ap_ip")
         if not ap_ip or ap_ip == "0.0.0.0":
             ap_ip = self.host
+
+        # Log when a tag reports an AP we don't manage
+        if ap_ip != self.host and DOMAIN in self.hass.data:
+            hubs = self.hass.data[DOMAIN]
+            if not any(h.host == ap_ip for h in hubs.values()):
+                _LOGGER.info(
+                    "Tag %s reported unknown AP %s", tag_mac, ap_ip
+                )
 
         # Decide whether to accept this update when multiple APs report
         now = datetime.utcnow()

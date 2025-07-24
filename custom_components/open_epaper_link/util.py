@@ -7,6 +7,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.exceptions import HomeAssistantError
 
+_LOGGER = logging.getLogger(__name__)
+
 
 def get_hub_for_tag(hass: HomeAssistant, mac: str):
     """Return the Hub instance responsible for a tag."""
@@ -16,13 +18,17 @@ def get_hub_for_tag(hass: HomeAssistant, mac: str):
         if tag_data:
             ap_ip = tag_data.get("ap_ip")
             if ap_ip == hub.host:
+                _LOGGER.debug("Using hub %s for tag %s", hub.host, mac)
                 return hub
 
     # Fallback to the first hub if none matched
     if hass.data.get(DOMAIN):
-        return next(iter(hass.data[DOMAIN].values()))
+        fallback = next(iter(hass.data[DOMAIN].values()))
+        _LOGGER.debug("Falling back to first hub %s for tag %s", fallback.host, mac)
+        return fallback
+
+    _LOGGER.warning("No hubs configured when looking up tag %s", mac)
     raise HomeAssistantError("Integration not configured")
-_LOGGER = logging.getLogger(__name__)
 
 def get_image_folder(hass: HomeAssistant) -> str:
     """Return the folder where images are stored.
