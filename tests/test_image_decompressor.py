@@ -50,11 +50,11 @@ def make_tag(bpp=1):
     )
 
 
-def encode_g5(block: bytes) -> bytes:
+def encode_g5(rows: bytes) -> bytes:
     out = bytearray()
     i = 0
-    while i < len(block):
-        chunk = block[i : i + 127]
+    while i < len(rows):
+        chunk = rows[i : i + 127]
         out.append(len(chunk) - 1)
         out.extend(chunk)
         i += len(chunk)
@@ -105,8 +105,8 @@ def test_decode_esl_raw_g5():
     decode_esl_raw = load_decoder()
     tag = make_tag(1)
     plane = bytes([0xAA] * 8)
-    block = b"\x00\x00\x08\x00\x00\x00" + plane
-    payload = encode_g5(block)
+    header = b"\x00\x00\x08\x00\x01\x00"
+    payload = header + encode_g5(plane)
     data = len(payload).to_bytes(4, "little") + payload
     result = decode_esl_raw(data, tag)
     assert result == plane

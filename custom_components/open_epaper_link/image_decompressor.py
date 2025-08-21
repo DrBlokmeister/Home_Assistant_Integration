@@ -62,21 +62,45 @@ def decode_esl_raw(data: bytes, tag_type: TagType) -> bytes:
     while offset + 4 <= len(data):
         block_size = int.from_bytes(data[offset:offset + 4], "little")
         offset += 4
+        remaining = len(data) - offset
+        if block_size > remaining:
+            _LOGGER.debug(
+                "Block %d: size %d exceeds remaining %d, clamping",
+                block_index,
+                block_size,
+                remaining,
+            )
+            block_size = remaining
         payload = data[offset:offset + block_size]
         offset += block_size
         _LOGGER.debug("Block %d: payload size %d bytes", block_index, block_size)
 
         codec = "raw"
         block = payload
-        if len(payload) >= 2 and payload[0] == 0x78 and payload[1] in (0x01, 0x9C, 0xDA):
+        if (
+            len(payload) >= 2
+            and payload[0] == 0x78
+            and payload[1] in (0x01, 0x9C, 0xDA)
+        ):
             codec = "zlib"
             block = zlib.decompress(payload)
         else:
-            try:
-                block = decode_g5(payload, width, height)
-                codec = "g5"
-            except Exception:  # pragma: no cover - invalid g5 data
+            if len(payload) < 6:
+                _LOGGER.debug("Block %d: too small", block_index)
+                block_index += 1
+                continue
+            y0, nrows, fmt, flags = struct.unpack("<HHBB", payload[:6])
+            if fmt & 0x01:
+                expected = nrows * bytes_per_row
+                try:
+                    rows = decode_g5(payload[6:], expected)
+                    block = payload[:6] + rows
+                    codec = "g5"
+                except Exception:  # pragma: no cover - unsupported g5
+                    block = payload
+            else:
                 block = payload
+
         _LOGGER.debug(
             "Block %d: codec %s, decompressed to %d bytes",
             block_index,
@@ -140,33 +164,31 @@ def decode_esl_raw(data: bytes, tag_type: TagType) -> bytes:
     return result
 
 
-def decode_g5(data: bytes, width: int, height: int) -> bytes:
-    """Decode a simple run-length encoded stream used by OpenEPaperLink.
+def decode_g5(data: bytes, expected: int) -> bytes:
+    """Decode the run-length encoded "G5" stream used by OpenEPaperLink.
 
-    The encoding uses one-byte commands:
+    Args:
+        data: Compressed row data without the 6-byte header.
+        expected: Expected number of output bytes. The decoder stops once
+            this many bytes have been produced.
 
-    * ``0b1cccnnnn`` – repeat ``n+1`` bytes of value ``0xFF`` when ``c``
-      is 1 or ``0x00`` when ``c`` is 0.  Only the lower four bits are
-      used for the count, yielding runs of 1‑16 bytes.
-    * ``0b0nnnnnnn`` – copy ``n+1`` literal bytes that follow the command
-      byte.
-
-    The width and height parameters are accepted for API compatibility
-    but are not required by the algorithm.
+    Returns:
+        bytes: Decompressed row data.
     """
 
-    out: list[int] = []
+    out = bytearray()
     i = 0
-    while i < len(data):
+    while i < len(data) and len(out) < expected:
         cmd = data[i]
         i += 1
         if cmd & 0x80:  # repeat
             count = (cmd & 0x0F) + 1
             colour = 0xFF if cmd & 0x40 else 0x00
-            out.extend([colour] * count)
+            out.extend([colour] * min(count, expected - len(out)))
         else:  # literal
             count = (cmd & 0x7F) + 1
-            out.extend(data[i : i + count])
+            chunk = data[i : i + count]
+            out.extend(chunk[: expected - len(out)])
             i += count
     return bytes(out)
 
@@ -225,7 +247,11 @@ def to_image(raw_data: bytes, tag_type: TagType) -> bytes:
 
         # Split into planes for 2bpp mode
         black_plane = data[:bytes_per_plane]
-        color_plane = data[bytes_per_plane:bytes_per_plane * 2] if tag_type.bpp == 2 else None
+        color_plane = (
+            data[bytes_per_plane:bytes_per_plane * 2]
+            if tag_type.bpp == 2
+            else None
+        )
 
         # Process pixels
         for y in range(native_height):
@@ -235,7 +261,11 @@ def to_image(raw_data: bytes, tag_type: TagType) -> bytes:
                 bit_mask = 0x80 >> (x % 8)
 
                 black = bool(black_plane[byte_offset] & bit_mask)
-                color = bool(color_plane[byte_offset] & bit_mask) if color_plane else False
+                color = (
+                    bool(color_plane[byte_offset] & bit_mask)
+                    if color_plane
+                    else False
+                )
 
                 if black and color:
                     pixels[x, y] = color_table['black']  # Overlap
@@ -251,7 +281,6 @@ def to_image(raw_data: bytes, tag_type: TagType) -> bytes:
 
     else:  # 3-4 bit packed format
         bits_per_pixel = tag_type.bpp
-        8 // bits_per_pixel
         bit_mask = (1 << bits_per_pixel) - 1
         bytes_per_row = (native_width * bits_per_pixel + 7) // 8
 
@@ -268,15 +297,24 @@ def to_image(raw_data: bytes, tag_type: TagType) -> bytes:
                     # Extract the color index
                     if bit_position + bits_per_pixel <= 8:
                         # Color index is contained within a single byte
-                        color_index = (data[byte_offset] >> (8 - bit_position - bits_per_pixel)) & bit_mask
+                        color_index = (
+                            data[byte_offset]
+                            >> (8 - bit_position - bits_per_pixel)
+                        ) & bit_mask
                     else:
                         # Color index spans two bytes
-                        first_byte = data[byte_offset] & ((1 << (8 - bit_position)) - 1)
+                        first_byte = data[byte_offset] & (
+                            (1 << (8 - bit_position)) - 1
+                        )
                         bits_from_first = 8 - bit_position
                         bits_from_second = bits_per_pixel - bits_from_first
                         if byte_offset + 1 < len(data):
-                            second_byte = data[byte_offset + 1] >> (8 - bits_from_second)
-                            color_index = (first_byte << bits_from_second) | second_byte
+                            second_byte = data[byte_offset + 1] >> (
+                                8 - bits_from_second
+                            )
+                            color_index = (
+                                first_byte << bits_from_second
+                            ) | second_byte
                         else:
                             color_index = first_byte << bits_from_second
 
