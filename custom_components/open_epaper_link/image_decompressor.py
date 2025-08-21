@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import logging
+import struct
 import zlib
 
 from PIL import Image
@@ -15,15 +16,14 @@ _LOGGER = logging.getLogger(__name__)
 def decode_esl_raw(data: bytes, tag_type: TagType) -> bytes:
     """Decode an OpenEPaperLink raw file.
 
-    Processes raw image data from the OpenEPaperLink AP, handling:
-
-    - Zlib compression detection and decompression
-    - BWR/BWY dual-plane formats for 2-bit displays
-    - Packed pixel formats for higher color depths
-    - Buffer rotation settings from tag type
-
-    The function detects the data format based on the tag type
-    information and header data, then processes accordingly.
+    The AP transfers image data as a sequence of blocks.  Each block is
+    prefixed with a 4‑byte little-endian length and the payload may be
+    compressed using either zlib or the custom "G5" scheme.  After
+    decompression, every block begins with a 6 byte header encoded as
+    ``<HHBB`` which specifies the starting line, the number of rows,
+    format and flags.  Blocks may cover only a portion of the display and
+    multiple blocks (and planes for 2bpp displays) must be assembled into
+    a full frame.
 
     Args:
         data: Raw image data bytes from the AP
@@ -31,143 +31,144 @@ def decode_esl_raw(data: bytes, tag_type: TagType) -> bytes:
 
     Returns:
         bytes: Decoded raw bitmap data ready for rendering
-
-    Raises:
-        Exception: For decompression errors or invalid data format
     """
-    _LOGGER.debug(f"Input size: {len(data)} bytes")
-    _LOGGER.debug(f"Tag type: {tag_type.name}")
-    _LOGGER.debug(f"Dimensions: {tag_type.width}x{tag_type.height}")
-    _LOGGER.debug(f"BPP: {tag_type.bpp}")
-    _LOGGER.debug(f"Rotate buffer: {tag_type.rotatebuffer}")
 
-    # Calculate expected sizes
+    _LOGGER.debug("Input size: %d bytes", len(data))
+    _LOGGER.debug("Tag type: %s", tag_type.name)
+    _LOGGER.debug("Dimensions: %dx%d", tag_type.width, tag_type.height)
+    _LOGGER.debug("BPP: %d", tag_type.bpp)
+    _LOGGER.debug("Rotate buffer: %d", tag_type.rotatebuffer)
+
     width = tag_type.height if tag_type.rotatebuffer % 2 else tag_type.width
     height = tag_type.width if tag_type.rotatebuffer % 2 else tag_type.height
 
-    if tag_type.bpp <= 2:  # Traditional 1-2 bit plane-based format
+    if tag_type.bpp <= 2:
         bytes_per_row = (width + 7) // 8
-        bytes_per_plane = bytes_per_row * height
-        total_size = bytes_per_plane * (2 if tag_type.bpp == 2 else 1)
-    else:  # 3-4 bit packed format
+        plane_buffers = [bytearray(bytes_per_row * height)]
+        if tag_type.bpp == 2:
+            plane_buffers.append(bytearray(bytes_per_row * height))
+    else:
         bits_per_pixel = tag_type.bpp
         bytes_per_row = (width * bits_per_pixel + 7) // 8
-        total_size = bytes_per_row * height
+        plane_buffers = [bytearray(bytes_per_row * height)]
 
-    header_size = 6
+    _LOGGER.debug("Effective dimensions: %dx%d", width, height)
+    _LOGGER.debug("Bytes per row: %d", bytes_per_row)
 
-    _LOGGER.debug(f"Effective dimensions: {width}x{height}")
-    _LOGGER.debug(f"Bits per pixel: {tag_type.bpp}")
-    _LOGGER.debug(f"Expected total size: {total_size} bytes")
+    # Iterate over size-prefixed blocks
+    offset = 0
+    block_index = 0
+    next_plane = 0
+    while offset + 4 <= len(data):
+        block_size = int.from_bytes(data[offset:offset + 4], "little")
+        offset += 4
+        payload = data[offset:offset + block_size]
+        offset += block_size
+        _LOGGER.debug("Block %d: payload size %d bytes", block_index, block_size)
 
-    # Check for compressed data
-    try:
-        if len(data) >= 4:
-            compressed_size = int.from_bytes(data[:4], byteorder='little')
-            if compressed_size > 0:  # Compressed data
-                _LOGGER.debug(f"Found compressed data, size from header: {compressed_size}")
+        codec = "raw"
+        block = payload
+        if len(payload) >= 2 and payload[0] == 0x78 and payload[1] in (0x01, 0x9C, 0xDA):
+            codec = "zlib"
+            block = zlib.decompress(payload)
+        else:
+            try:
+                block = decode_g5(payload, width, height)
+                codec = "g5"
+            except Exception:  # pragma: no cover - invalid g5 data
+                block = payload
+        _LOGGER.debug(
+            "Block %d: codec %s, decompressed to %d bytes",
+            block_index,
+            codec,
+            len(block),
+        )
 
-                compressed_data = data[4:]
-                _LOGGER.debug(f"Compressed data size: {len(compressed_data)} bytes")
+        if len(block) < 6:
+            _LOGGER.debug("Block %d: too small after decompression", block_index)
+            block_index += 1
+            continue
 
-                # Decompress data
-                decompressor = zlib.decompressobj(wbits=15)
-                decompressed_data = decompressor.decompress(compressed_data)
-                _LOGGER.debug(f"Decompressed size: {len(decompressed_data)} bytes")
+        y0, nrows, fmt, flags = struct.unpack("<HHBB", block[:6])
+        _LOGGER.debug(
+            "Block %d: y0=%d nrows=%d fmt=%d flags=0x%02X",
+            block_index,
+            y0,
+            nrows,
+            fmt,
+            flags,
+        )
 
-                # Handle potential second block for BWY/BWR mode
-                if tag_type.bpp == 2 and decompressor.unused_data:
-                    remaining_data = decompressor.unused_data
-                    _LOGGER.debug(f"Found second compressed block: {len(remaining_data)} bytes")
-                    second_decompressor = zlib.decompressobj(wbits=15)
-                    second_block = second_decompressor.decompress(remaining_data)
-
-                    # Extract and combine planes
-                    header = decompressed_data[:header_size]
-                    first_plane = decompressed_data[header_size:header_size + total_size // 2]
-                    second_plane = second_block[header_size:header_size + total_size // 2]
-                    data = first_plane + second_plane
-                else:
-                    # Single block contains all data
-                    data = decompressed_data[header_size:]
+        plane = 0
+        if tag_type.bpp == 2:
+            if flags & 0x1 in (0, 1):
+                plane = flags & 0x1
             else:
-                _LOGGER.debug("Data appears to be uncompressed")
-                # Strip header from uncompressed data
-                header_total = 4 + header_size
-                if len(data) >= header_total:
-                    data = data[header_total:]
+                plane = next_plane
+            next_plane = 1 - plane
 
-                # For uncompressed data, pad if necessary
-                if len(data) < total_size:
-                    _LOGGER.debug(f"Padding uncompressed data to {total_size} bytes")
-                    data = data.ljust(total_size, b'\x00')
-                return data
+        start = min(y0, height) * bytes_per_row
+        end_row = min(y0 + nrows, height)
+        end = end_row * bytes_per_row
+        data_bytes = block[6:6 + (end_row - y0) * bytes_per_row]
+        expected = (end_row - y0) * bytes_per_row
+        if len(data_bytes) < expected:
+            _LOGGER.debug(
+                "Block %d: payload shorter than expected (%d < %d), clamping",
+                block_index,
+                len(data_bytes),
+                expected,
+            )
+            expected = len(data_bytes)
+            end = start + expected
 
-    except Exception as e:
-        _LOGGER.debug(f"Processing failed: {e}")
-        _LOGGER.debug("Treating as raw data")
+        _LOGGER.debug(
+            "Block %d: placing %d bytes into plane %d at %d-%d",
+            block_index,
+            expected,
+            plane,
+            start,
+            end,
+        )
 
-        # Strip header if present
-        header_total = 4 + header_size
-        if len(data) >= header_total:
-            data = data[header_total:]
+        plane_buffers[plane][start:end] = data_bytes[:expected]
+        block_index += 1
 
-        if len(data) < total_size:
-            _LOGGER.debug(f"Padding raw data to {total_size} bytes")
-            data = data.ljust(total_size, b'\x00')
-
-    return data
+    result = bytes(plane_buffers[0])
+    if tag_type.bpp == 2:
+        result += bytes(plane_buffers[1])
+    return result
 
 
 def decode_g5(data: bytes, width: int, height: int) -> bytes:
-    """DOES NOT WORK YET and is a completely wrong implementation."""
-    output_size = (width * height + 7) // 8
-    output = bytearray(output_size)
-    out_pos = 0
-    in_pos = 0
+    """Decode a simple run-length encoded stream used by OpenEPaperLink.
 
-    # Process each display line
-    y = 0
-    while y < height:
-        x = 0
-        while x < width:
-            if in_pos >= len(data):
-                raise ValueError(f"Unexpected end of G5 data at y={y}, x={x}")
+    The encoding uses one-byte commands:
 
-            cmd = data[in_pos]
-            in_pos += 1
+    * ``0b1cccnnnn`` – repeat ``n+1`` bytes of value ``0xFF`` when ``c``
+      is 1 or ``0x00`` when ``c`` is 0.  Only the lower four bits are
+      used for the count, yielding runs of 1‑16 bytes.
+    * ``0b0nnnnnnn`` – copy ``n+1`` literal bytes that follow the command
+      byte.
 
-            if cmd & 0x80:  # Repeat command
-                count = ((cmd & 0x7f) + 1) * 8  # Count in bits
-                val = 0xFF if (cmd & 0x40) else 0x00
+    The width and height parameters are accepted for API compatibility
+    but are not required by the algorithm.
+    """
 
-                # Calculate how many bytes we can write
-                bytes_remaining = (width - x + 7) // 8
-                bytes_to_write = min(count // 8, bytes_remaining)
-
-                # Write repeated value
-                for _ in range(bytes_to_write):
-                    if out_pos < len(output):
-                        output[out_pos] = val
-                        out_pos += 1
-                x += bytes_to_write * 8
-
-            else:  # Copy literal data
-                count = (cmd + 1) * 8  # Count in bits
-                bytes_remaining = (width - x + 7) // 8
-                bytes_to_copy = min(count // 8, bytes_remaining)
-
-                # Copy literal bytes
-                for _ in range(bytes_to_copy):
-                    if in_pos < len(data) and out_pos < len(output):
-                        output[out_pos] = data[in_pos]
-                        out_pos += 1
-                        in_pos += 1
-                x += bytes_to_copy * 8
-
-        y += 1
-
-    return bytes(output)
+    out: list[int] = []
+    i = 0
+    while i < len(data):
+        cmd = data[i]
+        i += 1
+        if cmd & 0x80:  # repeat
+            count = (cmd & 0x0F) + 1
+            colour = 0xFF if cmd & 0x40 else 0x00
+            out.extend([colour] * count)
+        else:  # literal
+            count = (cmd & 0x7F) + 1
+            out.extend(data[i : i + count])
+            i += count
+    return bytes(out)
 
 
 def to_image(raw_data: bytes, tag_type: TagType) -> bytes:
@@ -250,7 +251,7 @@ def to_image(raw_data: bytes, tag_type: TagType) -> bytes:
 
     else:  # 3-4 bit packed format
         bits_per_pixel = tag_type.bpp
-        pixels_per_byte = 8 // bits_per_pixel
+        8 // bits_per_pixel
         bit_mask = (1 << bits_per_pixel) - 1
         bytes_per_row = (native_width * bits_per_pixel + 7) // 8
 
