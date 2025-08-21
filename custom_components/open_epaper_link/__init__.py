@@ -7,6 +7,7 @@ from homeassistant.const import Platform, EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import HomeAssistant
 from .const import DOMAIN
 from .hub import Hub
+from .tag_registry import TagRegistry
 from .services import async_setup_services, async_unload_services
 _LOGGER: Final = logging.getLogger(__name__)
 
@@ -39,13 +40,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     Returns:
         bool: True if setup was successful, False otherwise
     """
-    hub = Hub(hass, entry)
-
+    component_data = hass.data.setdefault(DOMAIN, {})
+    tag_registry = component_data.setdefault("tag_registry", TagRegistry(hass))
+    hub = Hub(hass, entry, tag_registry)
     # Do basic setup without WebSocket connection
     if not await hub.async_setup_initial():
         return False
 
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = hub
+    component_data[entry.entry_id] = hub
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 

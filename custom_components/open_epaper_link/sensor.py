@@ -11,6 +11,10 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
+from homeassistant.components.binary_sensor import (
+    BinarySensorDeviceClass,
+    BinarySensorEntity,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     SIGNAL_STRENGTH_DECIBELS,
@@ -469,8 +473,9 @@ class OpenEPaperLinkTagSensor(OpenEPaperLinkBaseSensor):
     """
         super().__init__(hub, description)
         self._tag_mac = tag_mac
+        self._registry = hub.tag_registry
 
-        name_base = self._hub.get_tag_data(tag_mac).get("tag_name", tag_mac)
+        name_base = self._registry.get_tag_data(tag_mac).get("tag_name", tag_mac)
         # self._attr_name = f"{name_base} {description.name}"
         self._attr_has_entity_name = True
         self._attr_translation_key = description.key
@@ -481,9 +486,9 @@ class OpenEPaperLinkTagSensor(OpenEPaperLinkBaseSensor):
         # Set entity_id with the sensor type included
         self.entity_id = f"{DOMAIN}.{tag_mac.lower()}_{description.key}"
 
-        firmware_version = str(self._hub.get_tag_data(tag_mac).get("version", ""))
+        firmware_version = str(self._registry.get_tag_data(tag_mac).get("version", ""))
 
-        tag_data = self._hub.get_tag_data(self._tag_mac)
+        tag_data = self._registry.get_tag_data(self._tag_mac)
         hw_type = tag_data.get("hw_type", 0)
         hw_string = get_hw_string(hw_type)
         width, height = get_hw_dimensions(hw_type)
@@ -503,12 +508,12 @@ class OpenEPaperLinkTagSensor(OpenEPaperLinkBaseSensor):
     def available(self) -> bool:
         """Return if entity is available.
 
-        A tag sensor is available if the tag is known to the hub.
+        A tag sensor is available if the tag exists in the global registry.
 
         Returns:
             bool: True if the sensor is available, False otherwise
         """
-        return self._tag_mac in self._hub.tags
+        return self._tag_mac in self._registry.tags
 
     @property
     def native_value(self):
@@ -524,7 +529,7 @@ class OpenEPaperLinkTagSensor(OpenEPaperLinkBaseSensor):
         """
         if not self.available or self.entity_description.value_fn is None:
             return None
-        return self.entity_description.value_fn(self._hub.get_tag_data(self._tag_mac))
+        return self.entity_description.value_fn(self._registry.get_tag_data(self._tag_mac))
 
     @property
     def extra_state_attributes(self):
@@ -540,7 +545,7 @@ class OpenEPaperLinkTagSensor(OpenEPaperLinkBaseSensor):
         if self.entity_description.attr_fn is None:
             return None
 
-        return self.entity_description.attr_fn(self._hub.get_tag_data(self._tag_mac))
+        return self.entity_description.attr_fn(self._registry.get_tag_data(self._tag_mac))
 
     async def async_added_to_hass(self) -> None:
         """Run when entity is added to register update signal handler.
@@ -566,6 +571,82 @@ class OpenEPaperLinkTagSensor(OpenEPaperLinkBaseSensor):
         Called when the tag's data is updated. Triggers a state update
         to refresh the sensor's value and attributes in the UI.
         """
+        self.async_write_ha_state()
+
+
+class OpenEPaperLinkTagConnectionSensor(BinarySensorEntity):
+    """Binary sensor showing if a tag is connected via this hub."""
+
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+
+    def __init__(self, hub: Hub, tag_mac: str) -> None:
+        """Initialize tag connection sensor."""
+        self._hub = hub
+        self._tag_mac = tag_mac
+        self._registry = hub.tag_registry
+
+        tag_data = self._registry.get_tag_data(tag_mac)
+        name_base = tag_data.get("tag_name", tag_mac)
+
+        self._attr_has_entity_name = True
+        self._attr_name = f"{name_base} Connection"
+
+        host_id = hub.host.replace(".", "_")
+        self._attr_unique_id = f"{tag_mac}_{host_id}_connection"
+        self.entity_id = f"binary_sensor.{tag_mac.lower()}_{host_id}_connection"
+
+        firmware_version = str(tag_data.get("version", ""))
+        hw_type = tag_data.get("hw_type", 0)
+        hw_string = get_hw_string(hw_type)
+        width, height = get_hw_dimensions(hw_type)
+
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, tag_mac)},
+            name=name_base,
+            manufacturer="OpenEPaperLink",
+            model=hw_string,
+            via_device=(DOMAIN, "ap"),
+            sw_version=f"0x{int(firmware_version, 16):X}" if firmware_version else "Unknown",
+            serial_number=tag_mac,
+            hw_version=f"{width}x{height}",
+        )
+
+    @property
+    def available(self) -> bool:
+        """Return if entity is available."""
+        return self._tag_mac in self._registry.tags
+
+    @property
+    def is_on(self) -> bool:
+        """Return true if tag is connected via this hub."""
+        tag_host = self._registry.get_tag_data(self._tag_mac).get("last_ap_host")
+        return self._hub.online and tag_host == self._hub.host
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        """Return state attributes."""
+        return {"connected_via": self._registry.get_tag_data(self._tag_mac).get("last_ap_host")}
+
+    async def async_added_to_hass(self) -> None:
+        """Register dispatcher callbacks."""
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                f"{DOMAIN}_tag_update_{self._tag_mac}",
+                self._handle_update,
+            )
+        )
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                f"{DOMAIN}_connection_status",
+                self._handle_update,
+            )
+        )
+
+    @callback
+    def _handle_update(self, *_: Any) -> None:
+        """Handle updates from dispatcher."""
         self.async_write_ha_state()
 
 
@@ -718,6 +799,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         for description in TAG_SENSOR_TYPES:
             sensor = OpenEPaperLinkTagSensor(hub, tag_mac, description)
             entities.append(sensor)
+
+        entities.append(OpenEPaperLinkTagConnectionSensor(hub, tag_mac))
 
         async_add_entities(entities)
 
