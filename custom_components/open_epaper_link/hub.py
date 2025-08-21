@@ -19,8 +19,9 @@ import logging
 
 _LOGGER: Final = logging.getLogger(__name__)
 
-from .const import DOMAIN, SIGNAL_AP_UPDATE, SIGNAL_TAG_UPDATE, SIGNAL_TAG_IMAGE_UPDATE
+from .const import DOMAIN, SIGNAL_AP_UPDATE, SIGNAL_TAG_IMAGE_UPDATE
 from .tag_types import get_tag_types_manager, get_hw_string
+from .tag_registry import TagRegistry
 
 STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}_tags"
@@ -56,7 +57,7 @@ class Hub:
         ap_config: Dictionary of current AP configuration settings
         ap_status: Dictionary of current AP status information
     """
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, tag_registry: TagRegistry) -> None:
         """Handle WebSocket connection and process incoming messages.
 
         Manages the lifecycle of the WebSocket connection, including:
@@ -102,6 +103,8 @@ class Hub:
         self._button_debounce_interval = timedelta(seconds=0.5)
         self._nfc_last_scan: Dict[str, datetime] = {}
         self._nfc_debounce_interval = timedelta(seconds=1)
+        self._tag_update_cache: Dict[str, any] = {}
+        self._tag_registry = tag_registry
         self._update_debounce_interval()
 
     def _update_debounce_interval(self) -> None:
@@ -156,6 +159,8 @@ class Hub:
                 self._data = stored.get("tags", {})
                 self._known_tags = set(self._data.keys())
                 _LOGGER.debug("Restored %d tags from storage", len(self._known_tags))
+                for tag_mac, data in self._data.items():
+                    self._tag_registry.update_tag(tag_mac, data, self.host)
 
             # Initialize tag manager
             self._tag_manager = await get_tag_types_manager(self.hass)
@@ -546,8 +551,8 @@ class Hub:
                 if tag_mac in self._data:
                     block_requests = self._data[tag_mac].get("block_requests", 0) + 1
                     self._data[tag_mac]["block_requests"] = block_requests
-                    # Notify of update
-                    async_dispatcher_send(self.hass, f"{SIGNAL_TAG_UPDATE}_{tag_mac}")
+                    # Notify registry of update
+                    self._tag_registry.update_tag(tag_mac, self._data[tag_mac], self.host)
         if "reports xfer complete" in log_msg:
             # Extract MAC address from block request message
             parts = log_msg.split()
@@ -555,7 +560,11 @@ class Hub:
                 tag_mac = parts[0].upper()
                 if tag_mac in self._data:
                     # Notify of update
-                    async_dispatcher_send(self.hass, f"{SIGNAL_TAG_IMAGE_UPDATE}_{tag_mac}", True)
+                    async_dispatcher_send(
+                        self.hass,
+                        f"{SIGNAL_TAG_IMAGE_UPDATE}_{tag_mac}",
+                        True,
+                    )
 
     async def _process_tag_data(self, tag_mac: str, tag_data: dict, is_initial_load: bool = False) -> bool:
         """Process tag data and update internal state.
@@ -594,6 +603,20 @@ class Hub:
 
         tag_name = tag_data.get("alias") or tag_mac
         last_seen = tag_data.get("lastseen")
+        update_count = tag_data.get("updatecount")
+
+        # Detect duplicate broadcasts using last_seen or update_count
+        identifier = update_count if update_count is not None else last_seen
+        if (
+            not is_new_tag
+            and identifier is not None
+            and self._tag_update_cache.get(tag_mac) == identifier
+        ):
+            _LOGGER.debug(
+                "Ignoring duplicate payload for tag %s with id %s", tag_mac, identifier
+            )
+            return False
+
         next_update = tag_data.get("nextupdate")
         next_checkin = tag_data.get("nextcheckin")
         lqi = tag_data.get("LQI")
@@ -605,7 +628,8 @@ class Hub:
         hw_string = get_hw_string(hw_type)
         width, height = self._tag_manager.get_hw_dimensions(hw_type)
         content_mode = tag_data.get("contentMode")
-        wakeup_reason = self._get_wakeup_reason_string(tag_data.get("wakeupReason"))
+        wakeup_reason_raw = tag_data.get("wakeupReason")
+        wakeup_reason = self._get_wakeup_reason_string(wakeup_reason_raw)
         capabilities = tag_data.get("capabilities")
         hashv = tag_data.get("hash")
         modecfgjson = tag_data.get("modecfgjson")
@@ -614,7 +638,6 @@ class Hub:
         lut = tag_data.get("lut")
         channel = tag_data.get("ch")
         version = tag_data.get("ver")
-        update_count = tag_data.get("updatecount")
 
         # Check if name has changed
         old_name = existing_data.get("tag_name")
@@ -640,7 +663,7 @@ class Hub:
 
         # Update boot count if this is a power-on event
         boot_count = existing_data.get("boot_count", 1)
-        if not is_initial_load and wakeup_reason in [1, 252, 254]:  # BOOT, FIRSTBOOT, WDT_RESET
+        if not is_initial_load and wakeup_reason_raw in [1, 252, 254]:  # BOOT, FIRSTBOOT, WDT_RESET
             boot_count += 1
             runtime_total = 0  # Reset runtime on boot
 
@@ -683,6 +706,7 @@ class Hub:
             "boot_count": boot_count,
             "checkin_count": checkin_count,
             "block_requests": block_requests,
+            "last_ap_host": self.host,
         }
 
         # Handle new tag discovery
@@ -692,13 +716,15 @@ class Hub:
             # Fire discovery event before saving
             async_dispatcher_send(self.hass, f"{DOMAIN}_tag_discovered", tag_mac)
 
-        # Fire state update event
-        async_dispatcher_send(self.hass, f"{SIGNAL_TAG_UPDATE}_{tag_mac}")
+        # Update cache and global registry
+        if identifier is not None:
+            self._tag_update_cache[tag_mac] = identifier
+
+        self._tag_registry.update_tag(tag_mac, self._data[tag_mac], self.host)
 
         # Handle wakeup event if needed and not initial load
-        wakeup_reason = tag_data.get("wakeupReason")
-        if not is_initial_load and wakeup_reason is not None:
-            reason_string = self._get_wakeup_reason_string(wakeup_reason)
+        if not is_initial_load and wakeup_reason_raw is not None:
+            reason_string = self._get_wakeup_reason_string(wakeup_reason_raw)
 
             should_fire = True
             current_time = datetime.now()
@@ -923,7 +949,7 @@ class Hub:
             self._data.pop(tag_mac, None)
 
             # Notify that this tag has been removed
-            async_dispatcher_send(self.hass, f"{SIGNAL_TAG_UPDATE}_{tag_mac}")
+            self._tag_registry.remove_tag(tag_mac)
 
             # Remove related devices and entities
             device_registry = dr.async_get(self.hass)
@@ -977,7 +1003,7 @@ class Hub:
                 self._known_tags.remove(tag_mac)
                 self._data.pop(tag_mac, None)
                 # Notify that this tag's state has changed
-                async_dispatcher_send(self.hass, f"{SIGNAL_TAG_UPDATE}_{tag_mac}")
+                self._tag_registry.remove_tag(tag_mac)
 
         # If the blacklist has changed, trigger cleanup
         if set(old_blacklist) != set(self._blacklisted_tags):
@@ -990,7 +1016,7 @@ class Hub:
             # Force a state refresh for all remaining tags
             for tag_mac in self._known_tags:
                 if tag_mac not in self._blacklisted_tags:
-                    async_dispatcher_send(self.hass, f"{SIGNAL_TAG_UPDATE}_{tag_mac}")
+                    self._tag_registry.update_tag(tag_mac, self._data[tag_mac], self.host)
 
             # Save updated data to storage
             await self._store.async_save({
@@ -1212,6 +1238,11 @@ class Hub:
             list[str]: List of MAC addresses for all known, non-blacklisted tags
         """
         return list(self._known_tags)
+
+    @property
+    def tag_registry(self) -> TagRegistry:
+        """Return the shared tag registry."""
+        return self._tag_registry
 
     def get_tag_data(self, tag_mac: str) -> dict:
         """Get the current data for a specific tag.
