@@ -100,6 +100,8 @@ class Hub:
         self._external_ws_tasks: dict[str, asyncio.Task] = {}
         self._external_ap_data: dict[str, dict] = {}
         self._external_online: dict[str, bool] = {}
+        self._external_ap_config: dict[str, dict] = {}
+        self._last_config_hash: dict[str, int] = {}
         self._last_record_count = None
         self.ap_env = None
         self.ap_model = "ESP32"
@@ -498,7 +500,7 @@ class Hub:
             elif "apitem" in data:
                 # Check if this is actually a config change message
                 if data.get("apitem", {}).get("type") == "change":
-                    await self._handle_ap_config_message(data)
+                    await self._handle_ap_config_message(host)
                 else:
                     _LOGGER.debug("Ignoring non-change AP message")
             else:
@@ -1108,51 +1110,39 @@ class Hub:
                 "tags": self._data
             })
 
-    async def _handle_ap_config_message(self,dict) -> None:
-        """Handle AP configuration updates.
+    async def _handle_ap_config_message(self, host: str) -> None:
+        """Handle AP configuration updates for the given host."""
 
-        Fetches the current AP configuration via HTTP and updates the
-        internal configuration state. This triggers when the AP sends
-        a configuration change notification.
-
-        The method uses a hash comparison to only trigger entity updates
-        when the configuration actually changes.
-
-        Args:
-            message: The configuration message from the AP
-        """
         try:
             if self._shutdown.is_set():
                 return
 
-            async with aiohttp.ClientSession() as session:
-                async with async_timeout.timeout(10):
-                    async with session.get(f"http://{self.host}/get_ap_config") as response:
-                        if response.status != 200:
-                            _LOGGER.error("Failed to fetch AP config: HTTP %s", response.status)
-                            return
+            async with async_timeout.timeout(10):
+                async with self._session.get(f"http://{host}/get_ap_config") as response:
+                    if response.status != 200:
+                        _LOGGER.error("Failed to fetch AP config from %s: HTTP %s", host, response.status)
+                        return
 
-                        new_config = await response.json()
+                    new_config = await response.json()
 
-                        # Compare with existing config
-                        if not hasattr(self, '_last_config_hash'):
-                            self._last_config_hash = None
+                    target = self.ap_config if host == self.host else self._external_ap_config.setdefault(host, {})
+                    last_hash = self._last_config_hash.get(host)
+                    new_hash = hash(frozenset(new_config.items()))
 
-                        # Create hash of new config for comparison
-                        new_hash = hash(frozenset(new_config.items()))
-
-                        if new_hash != self._last_config_hash:
-                            self.ap_config = new_config
-                            self._last_config_hash = new_hash
-                            _LOGGER.debug("AP config updated: %s", self.ap_config)
-                            async_dispatcher_send(self.hass, f"{DOMAIN}_ap_config_update")
-                        else:
-                            _LOGGER.debug("AP config unchanged, skipping update")
+                    if new_hash != last_hash:
+                        target.clear()
+                        target.update(new_config)
+                        self._last_config_hash[host] = new_hash
+                        _LOGGER.debug("AP config updated for %s: %s", host, target)
+                        signal = f"{DOMAIN}_ap_config_update" if host == self.host else f"{DOMAIN}_ap_config_update_{host}"
+                        async_dispatcher_send(self.hass, signal)
+                    else:
+                        _LOGGER.debug("AP config unchanged for %s, skipping update", host)
 
         except asyncio.TimeoutError:
-            _LOGGER.error("Timeout fetching AP config")
+            _LOGGER.error("Timeout fetching AP config from %s", host)
         except Exception as err:
-            _LOGGER.error("Failed to fetch AP config: %s", err)
+            _LOGGER.error("Failed to fetch AP config from %s: %s", host, err)
 
     @staticmethod
     def _get_wakeup_reason_string(reason: int) -> str:
@@ -1366,17 +1356,10 @@ class Hub:
         """
         return self._ap_data.copy()
 
-    async def async_update_ap_config(self) -> None:
-        """Force an update of AP configuration from the AP.
+    async def async_update_ap_config(self, host: str | None = None) -> None:
+        """Force an update of AP configuration from the AP."""
 
-        Fetches the current AP configuration settings via HTTP and
-        updates the internal configuration state. This will trigger
-        updates for any entities that display configuration values.
-
-        Raises:
-            HomeAssistantError: If the AP is offline or returns an error.
-        """
-        await self._handle_ap_config_message({"apitem": {"type": "change"}})
+        await self._handle_ap_config_message(host or self.host)
 
     @staticmethod
     def _calculate_runtime_delta(new_data: dict, existing_data: dict) -> int:
@@ -1482,6 +1465,12 @@ class Hub:
         if host is None or host == self.host:
             return self._ap_data
         return self._external_ap_data.get(host, {})
+
+    def get_ap_config(self, host: str | None = None) -> dict:
+        """Return AP configuration for the given host."""
+        if host is None or host == self.host:
+            return self.ap_config
+        return self._external_ap_config.get(host, {})
 
     def is_online(self, host: str | None = None) -> bool:
         """Return connection state for the given host."""
