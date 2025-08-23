@@ -17,6 +17,7 @@ PLATFORMS = [
     Platform.SELECT,
     Platform.SWITCH,
     Platform.TEXT,
+    Platform.BINARY_SENSOR,
 ]
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up OpenEPaperLink integration from a config entry.
