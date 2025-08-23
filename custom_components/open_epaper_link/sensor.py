@@ -605,10 +605,19 @@ class OpenEPaperLinkAPSensor(OpenEPaperLinkBaseSensor):
         self._attr_translation_key = description.key
         self._attr_unique_id = f"{self._hub.entry.entry_id}_{host}_{description.key}"
 
-        # Set device info
+        # Set device info. Use a stable identifier for the primary hub so
+        # sensors and controls share the same device, while secondary hubs
+        # retain their host-specific identifiers.
+        if host == self._hub.host:
+            identifier = "ap"
+            name = "OpenEPaperLink AP"
+        else:
+            identifier = f"ap_{host}"
+            name = f"OpenEPaperLink AP {host}"
+
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, f"ap_{host}")},
-            name=f"OpenEPaperLink AP {host}",
+            identifiers={(DOMAIN, identifier)},
+            name=name,
             model=self._hub.ap_model,
             manufacturer="OpenEPaperLink",
         )
