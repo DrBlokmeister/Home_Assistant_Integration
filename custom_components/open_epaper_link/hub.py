@@ -106,7 +106,7 @@ class Hub:
 
         self._unsub_callbacks: list[CALLBACK_TYPE] = []
         self.online = False
-        self._reconnect_task: asyncio.Task | None = None
+        self._reconnect_tasks: dict[str, asyncio.Task] = {}
         self._tag_manager = None
         self._tag_manager_ready = asyncio.Event()
         self._blacklisted_tags = entry.options.get("blacklisted_tags", [])
@@ -282,6 +282,28 @@ class Hub:
             except asyncio.CancelledError:
                 pass
 
+        # Cancel external WebSocket tasks
+        for host, task in list(self._external_ws_tasks.items()):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            self._external_online[host] = False
+            async_dispatcher_send(self.hass, f"{DOMAIN}_connection_status_{host}", False)
+        self._external_ws_tasks.clear()
+
+        # Cancel any scheduled reconnect tasks
+        for task in self._reconnect_tasks.values():
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._reconnect_tasks.clear()
+
         # Clean up other callbacks
         while self._unsub_callbacks:
             try:
@@ -384,31 +406,34 @@ class Hub:
     def _schedule_reconnect(self, host: str) -> None:
         """Schedule a WebSocket reconnection attempt.
 
-        Creates a task to reconnect after RECONNECT_INTERVAL seconds.
-        If a reconnection task is already scheduled, it's cancelled first
-        to avoid multiple concurrent reconnection attempts.
+        Creates a task to reconnect after RECONNECT_INTERVAL seconds for the
+        specified host. Each host maintains its own reconnect task to avoid
+        cancelling reconnection attempts for other hubs.
         """
+
         async def reconnect():
             await asyncio.sleep(RECONNECT_INTERVAL)
-            if not self._shutdown.is_set():
-                if host == self.host:
-                    self._ws_task = self.hass.async_create_task(
-                        self._websocket_handler(host),
-                        f"{DOMAIN}_websocket",
-                    )
-                else:
-                    task = self.hass.async_create_task(
-                        self._websocket_handler(host),
-                        f"{DOMAIN}_websocket_{host}",
-                    )
-                    self._external_ws_tasks[host] = task
+            if self._shutdown.is_set():
+                return
+            if host == self.host:
+                self._ws_task = self.hass.async_create_task(
+                    self._websocket_handler(host),
+                    f"{DOMAIN}_websocket",
+                )
+            else:
+                task = self.hass.async_create_task(
+                    self._websocket_handler(host),
+                    f"{DOMAIN}_websocket_{host}",
+                )
+                self._external_ws_tasks[host] = task
 
-        if self._reconnect_task and not self._reconnect_task.done():
-            self._reconnect_task.cancel()
+        existing = self._reconnect_tasks.get(host)
+        if existing and not existing.done():
+            existing.cancel()
 
-        self._reconnect_task = self.hass.async_create_task(
+        self._reconnect_tasks[host] = self.hass.async_create_task(
             reconnect(),
-            f"{DOMAIN}_reconnect",
+            f"{DOMAIN}_reconnect_{host}",
         )
 
     async def _handle_message(self, host: str, message: str) -> None:
