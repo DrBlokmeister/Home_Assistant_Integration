@@ -23,6 +23,11 @@
         }
     },
     "entity": {
+        "binary_sensor": {
+            "ws_connected": {
+                "name": "WebSocket verbunden"
+            }
+        },
         "switch": {
             "preview": {
                 "name": "Bildervorschau im AP"

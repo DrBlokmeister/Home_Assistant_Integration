@@ -20,7 +20,13 @@ import logging
 
 _LOGGER: Final = logging.getLogger(__name__)
 
-from .const import DOMAIN, SIGNAL_AP_UPDATE, SIGNAL_TAG_UPDATE, SIGNAL_TAG_IMAGE_UPDATE
+from .const import (
+    DOMAIN,
+    SIGNAL_AP_UPDATE,
+    SIGNAL_EXTERNAL_HUB_DISCOVERED,
+    SIGNAL_TAG_UPDATE,
+    SIGNAL_TAG_IMAGE_UPDATE,
+)
 from .tag_types import get_tag_types_manager, get_hw_string
 
 STORAGE_VERSION = 1
@@ -83,7 +89,6 @@ class Hub:
         self._shutdown = asyncio.Event()
         self._session = async_get_clientsession(hass)
         self._shutdown_handler: CALLBACK_TYPE | None = None
-        self._shutdown = asyncio.Event()
         self._store = Store[dict[str, any]](
             hass, STORAGE_VERSION, STORAGE_KEY, private=True, atomic_writes=True
         )
@@ -695,10 +700,24 @@ class Hub:
             _LOGGER.debug("Tag %s connected hub changed to %s", tag_mac, connected_ip)
 
         if connected_ip != self.host and connected_ip not in self.discovered_hubs:
+            # A tag reporting a different AP IP indicates another hub on the
+            # network. Register a device for it so platform entities can attach
+            # to the hub, then fire the discovery signal to create those
+            # entities and start tracking the hub's status.
             self.discovered_hubs.add(connected_ip)
             _LOGGER.info("Discovered external hub %s from tag %s", connected_ip, tag_mac)
+            device_registry = dr.async_get(self.hass)
+            device_registry.async_get_or_create(
+                config_entry_id=self.entry.entry_id,
+                identifiers={(DOMAIN, f"ap_{connected_ip}")},
+                name=f"OpenEPaperLink AP {connected_ip}",
+                manufacturer="OpenEPaperLink",
+                model=self.ap_model,
+            )
             self._schedule_reconnect(connected_ip)
-            async_dispatcher_send(self.hass, f"{DOMAIN}_external_hub_discovered", connected_ip)
+            async_dispatcher_send(
+                self.hass, SIGNAL_EXTERNAL_HUB_DISCOVERED, connected_ip
+            )
 
         # Ignore updates from hubs that are not the connected hub when we already know it
         existing_connected = existing_data.get("connected_ip")

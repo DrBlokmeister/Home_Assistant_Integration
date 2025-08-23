@@ -710,6 +710,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     ap_sensors = [OpenEPaperLinkAPSensor(hub, hub.host, description) for description in AP_SENSOR_TYPES]
     async_add_entities(ap_sensors)
 
+    # Add sensors for any hubs discovered before platform setup
+    for host in hub.discovered_hubs:
+        sensors = [OpenEPaperLinkAPSensor(hub, host, desc) for desc in AP_SENSOR_TYPES]
+        async_add_entities(sensors)
+
     @callback
     def async_add_external_hub(host: str) -> None:
         sensors = [OpenEPaperLinkAPSensor(hub, host, desc) for desc in AP_SENSOR_TYPES]
