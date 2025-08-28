@@ -7,11 +7,12 @@ from homeassistant.components.binary_sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.entity import DeviceInfo, EntityCategory
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, SIGNAL_EXTERNAL_HUB_DISCOVERED
 from .hub import Hub
+from .util import get_ap_device_info
 
 import logging
 
@@ -30,12 +31,7 @@ class OpenEPaperLinkWSBinarySensor(BinarySensorEntity):
         self._hub = hub
         self._host = host
         self._attr_unique_id = f"{hub.entry.entry_id}_{host}_ws_connected"
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, f"ap_{host}")},
-            name=f"OpenEPaperLink AP {host}",
-            model=self._hub.ap_model,
-            manufacturer="OpenEPaperLink",
-        )
+        self._attr_device_info = get_ap_device_info(hub, host)
 
     @property
     def is_on(self) -> bool:
