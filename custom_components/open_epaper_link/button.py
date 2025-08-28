@@ -11,7 +11,7 @@ import json
 import logging
 
 from .tag_types import get_hw_dimensions, get_tag_types_manager
-from .util import send_tag_cmd, reboot_ap
+from .util import get_ap_device_info, reboot_ap, send_tag_cmd
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -93,7 +93,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     # Add AP-level buttons
     async_add_entities([
         RebootAPButton(hass, hub),
-        RefreshTagTypesButton(hass),
+        RefreshTagTypesButton(hass, hub),
     ])
 
     # Listen for new tag discoveries
@@ -506,9 +506,7 @@ class RebootAPButton(ButtonEntity):
         Returns:
             dict: Device information dictionary
         """
-        return {
-            "identifiers": {(DOMAIN, "ap")},
-        }
+        return get_ap_device_info(self._hub, self._hub.host)
 
     async def async_press(self) -> None:
         """Handle the button press.
@@ -531,7 +529,7 @@ class RefreshTagTypesButton(ButtonEntity):
     to inform the user of the result.
     """
 
-    def __init__(self, hass: HomeAssistant) -> None:
+    def __init__(self, hass: HomeAssistant, hub) -> None:
         """Initialize the button entity.
 
         Sets up the button with appropriate name, icon, and device association.
@@ -540,6 +538,7 @@ class RefreshTagTypesButton(ButtonEntity):
             hass: Home Assistant instance
         """
         self._hass = hass
+        self._hub = hub
         self._attr_unique_id = "refresh_tag_types"
         # self._attr_name = "Refresh Tag Types"
         self._attr_has_entity_name = True
@@ -557,12 +556,7 @@ class RefreshTagTypesButton(ButtonEntity):
         Returns:
             dict: Device information dictionary
         """
-        return {
-            "identifiers": {(DOMAIN, "ap")},
-            "name": "OpenEPaperLink AP",
-            # "model": self._hub.ap_model,
-            "manufacturer": "OpenEPaperLink",
-        }
+        return get_ap_device_info(self._hub, self._hub.host)
 
     async def async_press(self) -> None:
         """Handle the button press.

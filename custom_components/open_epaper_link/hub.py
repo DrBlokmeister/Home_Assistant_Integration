@@ -194,6 +194,23 @@ class Hub:
                 await self.async_load_all_tags()
             except Exception as err:
                 _LOGGER.warning("Could not load initial tags from AP: %s", str(err))
+
+            device_registry = dr.async_get(self.hass)
+            device = device_registry.async_get_or_create(
+                config_entry_id=self.entry.entry_id,
+                identifiers={(DOMAIN, "ap")},
+                manufacturer="OpenEPaperLink",
+                model=self.ap_model,
+                name=self.entry.title or "OpenEPaperLink AP",
+            )
+            desired_name = self.entry.title or "OpenEPaperLink AP"
+            if device.name != desired_name:
+                device_registry.async_update_device(device.id, name=desired_name)
+            old_device = device_registry.async_get_device(
+                identifiers={(DOMAIN, f"ap_{self.host}")}
+            )
+            if old_device and old_device.id != device.id:
+                device_registry.async_remove_device(old_device.id)
             return True
 
         except Exception as err:

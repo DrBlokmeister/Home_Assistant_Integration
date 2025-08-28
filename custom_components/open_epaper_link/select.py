@@ -8,7 +8,7 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, SIGNAL_EXTERNAL_HUB_DISCOVERED
-from .util import set_ap_config_item
+from .util import get_ap_device_info, set_ap_config_item
 
 import logging
 
@@ -370,19 +370,7 @@ class APConfigSelect(SelectEntity):
         Returns:
             dict: Device information dictionary
         """
-        if self._host == self._hub.host:
-            identifier = "ap"
-            name = "OpenEPaperLink AP"
-        else:
-            identifier = f"ap_{self._host}"
-            name = f"OpenEPaperLink AP {self._host}"
-
-        return {
-            "identifiers": {(DOMAIN, identifier)},
-            "name": name,
-            "model": self._hub.ap_model,
-            "manufacturer": "OpenEPaperLink",
-        }
+        return get_ap_device_info(self._hub, self._host)
 
     @property
     def available(self) -> bool:

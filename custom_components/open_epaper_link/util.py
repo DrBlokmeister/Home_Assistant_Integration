@@ -5,7 +5,34 @@ import requests
 import logging
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.entity import DeviceInfo
+
 _LOGGER = logging.getLogger(__name__)
+
+
+def get_ap_device_info(hub, host: str) -> DeviceInfo:
+    """Return DeviceInfo for an AP, using entry title for the primary hub.
+
+    Args:
+        hub: Hub instance providing context
+        host: IP or hostname of the AP
+
+    Returns:
+        DeviceInfo: Standardized device information for the AP
+    """
+    if host == hub.host:
+        identifier = "ap"
+        name = hub.entry.title or "OpenEPaperLink AP"
+    else:
+        identifier = f"ap_{host}"
+        name = f"OpenEPaperLink AP {host}"
+
+    return DeviceInfo(
+        identifiers={(DOMAIN, identifier)},
+        name=name,
+        model=hub.ap_model,
+        manufacturer="OpenEPaperLink",
+    )
 
 def get_image_folder(hass: HomeAssistant) -> str:
     """Return the folder where images are stored.
