@@ -128,7 +128,7 @@ async def reboot_ap(hass: HomeAssistant) -> bool:
         _LOGGER.error("Failed to reboot OEPL Access Point: %s", str(e))
         return False
 
-async def set_ap_config_item(hub, key: str, value: str | int) -> bool:
+async def set_ap_config_item(hub, key: str, value: str | int, host: str | None = None) -> bool:
     """Set a configuration item on the Access Point.
 
     Updates a specific configuration setting on the AP via HTTP.
@@ -149,14 +149,17 @@ async def set_ap_config_item(hub, key: str, value: str | int) -> bool:
     Raises:
         HomeAssistantError: If the AP is offline or request fails
     """
-    if not hub.online:
-        _LOGGER.error("Cannot set config: AP is offline")
+    host = host or hub.host
+
+    if not hub.is_online(host):
+        _LOGGER.error("Cannot set config: AP %s is offline", host)
         return False
 
     # Only send update if value actually changed
-    current_value = hub.ap_config.get(key)
+    current_config = hub.get_ap_config(host)
+    current_value = current_config.get(key)
     if current_value == value:
-        _LOGGER.debug("Value unchanged, skipping update for %s = %s", key, value)
+        _LOGGER.debug("Value unchanged, skipping update for %s = %s on %s", key, value, host)
         return True
 
     data = {
@@ -165,17 +168,17 @@ async def set_ap_config_item(hub, key: str, value: str | int) -> bool:
     _LOGGER.debug("Setting AP config %s = %s", key, value)
     try:
         response = await hub.hass.async_add_executor_job(
-            lambda: requests.post(f"http://{hub.host}/save_apcfg", data=data)
+            lambda: requests.post(f"http://{host}/save_apcfg", data=data)
         )
         if response.status_code == 200:
             # Update local cache immediately to prevent race conditions
-            hub.ap_config[key] = value
-            # Only dispatch update for this specific change
-            async_dispatcher_send(hub.hass, f"{DOMAIN}_ap_config_update")
+            current_config[key] = value
+            signal = f"{DOMAIN}_ap_config_update" if host == hub.host else f"{DOMAIN}_ap_config_update_{host}"
+            async_dispatcher_send(hub.hass, signal)
             return True
         else:
-            _LOGGER.error("Failed to set AP config %s: HTTP %s", key, response.status_code)
+            _LOGGER.error("Failed to set AP config %s on %s: HTTP %s", key, host, response.status_code)
             return False
     except Exception as e:
-        _LOGGER.error("Failed to set AP config %s: %s", key, str(e))
+        _LOGGER.error("Failed to set AP config %s on %s: %s", key, host, str(e))
         return False

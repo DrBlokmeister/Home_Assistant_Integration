@@ -7,7 +7,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import DOMAIN, SIGNAL_EXTERNAL_HUB_DISCOVERED
 from .util import set_ap_config_item
 
 import logging
@@ -78,7 +78,7 @@ class APConfigSwitch(SwitchEntity):
     the configuration value (1 for on, 0 for off).
     """
 
-    def __init__(self, hub, key: str, name: str, icon: str, description: str) -> None:
+    def __init__(self, hub, host: str, key: str, name: str, icon: str, description: str) -> None:
         """Initialize the switch entity.
 
         Sets up the switch with appropriate name, unique ID, icon, and
@@ -92,9 +92,10 @@ class APConfigSwitch(SwitchEntity):
             description: Detailed description of the switch's purpose
         """
         self._hub = hub
+        self._host = host
         self._key = key
         # self._attr_name = f"AP {name}"
-        self._attr_unique_id = f"{hub.entry.entry_id}_{key}"
+        self._attr_unique_id = f"{hub.entry.entry_id}_{host}_{key}"
         self._attr_icon = icon
         self._attr_entity_category = EntityCategory.CONFIG
         self._attr_has_entity_name = True
@@ -112,9 +113,16 @@ class APConfigSwitch(SwitchEntity):
             dict: Device information dictionary with identifiers, name,
                   model, and manufacturer
         """
+        if self._host == self._hub.host:
+            identifier = "ap"
+            name = "OpenEPaperLink AP"
+        else:
+            identifier = f"ap_{self._host}"
+            name = f"OpenEPaperLink AP {self._host}"
+
         return {
-            "identifiers": {(DOMAIN, "ap")},
-            "name": "OpenEPaperLink AP",
+            "identifiers": {(DOMAIN, identifier)},
+            "name": name,
             "model": self._hub.ap_model,
             "manufacturer": "OpenEPaperLink",
         }
@@ -131,7 +139,7 @@ class APConfigSwitch(SwitchEntity):
         Returns:
             bool: True if the switch is available, False otherwise
         """
-        return self._hub.online and self._key in self._hub.ap_config
+        return self._hub.is_online(self._host) and self._key in self._hub.get_ap_config(self._host)
 
     @property
     def is_on(self) -> bool | None:
@@ -146,7 +154,7 @@ class APConfigSwitch(SwitchEntity):
         """
         if not self.available:
             return None
-        return bool(int(self._hub.ap_config.get(self._key, 0)))
+        return bool(int(self._hub.get_ap_config(self._host).get(self._key, 0)))
 
     async def async_turn_on(self, **kwargs) -> None:
         """Turn the entity on.
@@ -157,7 +165,7 @@ class APConfigSwitch(SwitchEntity):
         Args:
             **kwargs: Additional arguments (not used)
         """
-        await set_ap_config_item(self._hub, self._key, 1)
+        await set_ap_config_item(self._hub, self._key, 1, host=self._host)
 
     async def async_turn_off(self, **kwargs) -> None:
         """Turn the entity off.
@@ -168,7 +176,7 @@ class APConfigSwitch(SwitchEntity):
         Args:
             **kwargs: Additional arguments (not used)
         """
-        await set_ap_config_item(self._hub, self._key, 0)
+        await set_ap_config_item(self._hub, self._key, 0, host=self._host)
 
     @callback
     def _handle_ap_config_update(self):
@@ -208,7 +216,7 @@ class APConfigSwitch(SwitchEntity):
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
-                f"{DOMAIN}_ap_config_update",
+                f"{DOMAIN}_ap_config_update" if self._host == self._hub.host else f"{DOMAIN}_ap_config_update_{self._host}",
                 self._handle_ap_config_update,
             )
         )
@@ -217,7 +225,7 @@ class APConfigSwitch(SwitchEntity):
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
-                f"{DOMAIN}_connection_status",
+                f"{DOMAIN}_connection_status" if self._host == self._hub.host else f"{DOMAIN}_connection_status_{self._host}",
                 self._handle_connection_status,
             )
         )
@@ -241,22 +249,54 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     """
     hub = hass.data[DOMAIN][entry.entry_id]
 
-    # Wait for initial AP config to be loaded
-    if not hub.ap_config:
-        await hub.async_update_ap_config()
-
     entities = []
 
-    # Create switch entities from configuration
+    # Ensure config loaded for primary hub
+    if not hub.get_ap_config(hub.host):
+        await hub.async_update_ap_config(hub.host)
+
     for config in SWITCH_ENTITIES:
         entities.append(
             APConfigSwitch(
                 hub,
+                hub.host,
                 config["key"],
                 config["name"],
                 config["icon"],
-                config["description"]
+                config["description"],
             )
         )
 
+    # Add switches for already discovered external hubs
+    for host in hub.discovered_hubs:
+        if not hub.get_ap_config(host):
+            await hub.async_update_ap_config(host)
+        for config in SWITCH_ENTITIES:
+            entities.append(
+                APConfigSwitch(
+                    hub,
+                    host,
+                    config["key"],
+                    config["name"],
+                    config["icon"],
+                    config["description"],
+                )
+            )
+
     async_add_entities(entities)
+
+    async def async_add_external_hub(host: str) -> None:
+        await hub.async_update_ap_config(host)
+        new_entities = [
+            APConfigSwitch(hub, host, cfg["key"], cfg["name"], cfg["icon"], cfg["description"])
+            for cfg in SWITCH_ENTITIES
+        ]
+        async_add_entities(new_entities)
+
+    entry.async_on_unload(
+        async_dispatcher_connect(
+            hass,
+            SIGNAL_EXTERNAL_HUB_DISCOVERED,
+            lambda host: hass.async_create_task(async_add_external_hub(host)),
+        )
+    )

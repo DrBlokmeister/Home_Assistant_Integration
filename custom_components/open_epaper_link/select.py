@@ -7,7 +7,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import DOMAIN, SIGNAL_EXTERNAL_HUB_DISCOVERED
 from .util import set_ap_config_item
 
 import logging
@@ -335,7 +335,7 @@ class APConfigSelect(SelectEntity):
     also responds to configuration changes from other sources.
     """
 
-    def __init__(self, hub, key: str, name: str, icon: str, mapping: OptionMapping) -> None:
+    def __init__(self, hub, host: str, key: str, name: str, icon: str, mapping: OptionMapping) -> None:
         """Initialize the select entity.
 
         Sets up the select entity with appropriate name, icon, and options.
@@ -348,11 +348,12 @@ class APConfigSelect(SelectEntity):
             mapping: OptionMapping for value/option conversion
         """
         self._hub = hub
+        self._host = host
         self._key = key
         # self._attr_name = f"AP {name}"
         self._attr_has_entity_name = True
         self._attr_translation_key = key
-        self._attr_unique_id = f"{hub.entry.entry_id}_{key}"
+        self._attr_unique_id = f"{hub.entry.entry_id}_{host}_{key}"
         self._attr_icon = icon
         self._attr_entity_category = EntityCategory.CONFIG
         self._mapping = mapping
@@ -369,9 +370,16 @@ class APConfigSelect(SelectEntity):
         Returns:
             dict: Device information dictionary
         """
+        if self._host == self._hub.host:
+            identifier = "ap"
+            name = "OpenEPaperLink AP"
+        else:
+            identifier = f"ap_{self._host}"
+            name = f"OpenEPaperLink AP {self._host}"
+
         return {
-            "identifiers": {(DOMAIN, "ap")},
-            "name": "OpenEPaperLink AP",
+            "identifiers": {(DOMAIN, identifier)},
+            "name": name,
             "model": self._hub.ap_model,
             "manufacturer": "OpenEPaperLink",
         }
@@ -389,7 +397,7 @@ class APConfigSelect(SelectEntity):
             bool: True if the entity is available, False otherwise
         """
         """Return if entity is available."""
-        return self._hub.online and self._key in self._hub.ap_config
+        return self._hub.is_online(self._host) and self._key in self._hub.get_ap_config(self._host)
 
     @property
     def current_option(self) -> str | None:
@@ -404,7 +412,7 @@ class APConfigSelect(SelectEntity):
         """
         if not self.available:
             return None
-        value = self._hub.ap_config.get(self._key)
+        value = self._hub.get_ap_config(self._host).get(self._key)
         return self._mapping.get_option(value)
 
     async def async_select_option(self, option: str) -> None:
@@ -418,7 +426,7 @@ class APConfigSelect(SelectEntity):
         """
         value = self._mapping.get_value(option)
         if value is not None:
-            await set_ap_config_item(self._hub, self._key, value)
+            await set_ap_config_item(self._hub, self._key, value, host=self._host)
 
     @callback
     def _handle_ap_config_update(self):
@@ -447,7 +455,7 @@ class APConfigSelect(SelectEntity):
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
-                f"{DOMAIN}_ap_config_update",
+                f"{DOMAIN}_ap_config_update" if self._host == self._hub.host else f"{DOMAIN}_ap_config_update_{self._host}",
                 self._handle_ap_config_update,
             )
         )
@@ -456,7 +464,7 @@ class APConfigSelect(SelectEntity):
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
-                f"{DOMAIN}_connection_status",
+                f"{DOMAIN}_connection_status" if self._host == self._hub.host else f"{DOMAIN}_connection_status_{self._host}",
                 self._handle_connection_status,
             )
         )
@@ -473,7 +481,7 @@ class APTimeHourSelect(APConfigSelect):
     periods when tag updates are disabled.
     """
 
-    def __init__(self, hub, key: str, name: str, icon: str) -> None:
+    def __init__(self, hub, host: str, key: str, name: str, icon: str) -> None:
         """Initialize time select entity.
 
         Creates a specialized select entity for time selection with
@@ -489,7 +497,7 @@ class APTimeHourSelect(APConfigSelect):
         time_mapping = OptionMapping({
             i: f"{i:02d}:00" for i in range(24)
         })
-        super().__init__(hub, key, name, icon, time_mapping)
+        super().__init__(hub, host, key, name, icon, time_mapping)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -508,26 +516,68 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     """
     hub = hass.data[DOMAIN][entry.entry_id]
 
-    # Wait for initial AP config to be loaded
-    if not hub.ap_config:
-        await hub.async_update_ap_config()
-
     entities: list[SelectEntity] = []
 
-    # Add standard select entities
-    for config in SELECT_ENTITIES:
-        entities.append(APConfigSelect(
-            hub,
-            config["key"],
-            config["name"],
-            config["icon"],
-            config["mapping"]
-        ))
+    # Ensure config loaded for primary hub
+    if not hub.get_ap_config(hub.host):
+        await hub.async_update_ap_config(hub.host)
 
-    # Add time select entities
+    for config in SELECT_ENTITIES:
+        entities.append(
+            APConfigSelect(
+                hub,
+                hub.host,
+                config["key"],
+                config["name"],
+                config["icon"],
+                config["mapping"],
+            )
+        )
+
     entities.extend([
-        APTimeHourSelect(hub, "sleeptime1", "No updates between 1 (from)", "mdi:sleep"),
-        APTimeHourSelect(hub, "sleeptime2", "No updates between 2 (to)", "mdi:sleep"),
+        APTimeHourSelect(hub, hub.host, "sleeptime1", "No updates between 1 (from)", "mdi:sleep"),
+        APTimeHourSelect(hub, hub.host, "sleeptime2", "No updates between 2 (to)", "mdi:sleep"),
     ])
 
+    # Add entities for discovered external hubs
+    for host in hub.discovered_hubs:
+        if not hub.get_ap_config(host):
+            await hub.async_update_ap_config(host)
+        for config in SELECT_ENTITIES:
+            entities.append(
+                APConfigSelect(
+                    hub,
+                    host,
+                    config["key"],
+                    config["name"],
+                    config["icon"],
+                    config["mapping"],
+                )
+            )
+        entities.extend([
+            APTimeHourSelect(hub, host, "sleeptime1", "No updates between 1 (from)", "mdi:sleep"),
+            APTimeHourSelect(hub, host, "sleeptime2", "No updates between 2 (to)", "mdi:sleep"),
+        ])
+
     async_add_entities(entities)
+
+    async def async_add_external_hub(host: str) -> None:
+        await hub.async_update_ap_config(host)
+        new_entities = [
+            APConfigSelect(hub, host, cfg["key"], cfg["name"], cfg["icon"], cfg["mapping"])
+            for cfg in SELECT_ENTITIES
+        ]
+        new_entities.extend([
+            APTimeHourSelect(hub, host, "sleeptime1", "No updates between 1 (from)", "mdi:sleep"),
+            APTimeHourSelect(hub, host, "sleeptime2", "No updates between 2 (to)", "mdi:sleep"),
+        ])
+        async_add_entities(new_entities)
+
+    entry.async_on_unload(
+        async_dispatcher_connect(
+            hass,
+            SIGNAL_EXTERNAL_HUB_DISCOVERED,
+            lambda host: hass.async_create_task(async_add_external_hub(host)),
+        )
+    )
+
