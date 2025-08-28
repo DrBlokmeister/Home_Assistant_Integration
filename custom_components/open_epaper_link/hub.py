@@ -17,6 +17,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 import logging
+import ipaddress
 
 _LOGGER: Final = logging.getLogger(__name__)
 
@@ -674,7 +675,27 @@ class Hub:
         hashv = tag_data.get("hash")
         modecfgjson = tag_data.get("modecfgjson")
         is_external = tag_data.get("isexternal")
-        ap_ip = tag_data.get("apip")
+        ap_ip_raw = tag_data.get("apip")
+        ap_ip = None
+        if ap_ip_raw not in (None, "", 0):
+            prefix_host = source_host or self.host
+            try:
+                # Attempt to parse numeric IPs first
+                ip_val = int(ap_ip_raw)
+                if ip_val <= 0xFF:
+                    # Some firmware reports only the last octet; combine with host prefix
+                    ap_ip = f"{prefix_host.rsplit('.', 1)[0]}.{ip_val}"
+                else:
+                    ap_ip = str(ipaddress.IPv4Address(ip_val))
+            except (ValueError, ipaddress.AddressValueError):
+                try:
+                    candidate = ipaddress.IPv4Address(ap_ip_raw)
+                    if candidate.packed[:3] == b"\x00\x00\x00" and candidate.packed[3] != 0:
+                        ap_ip = f"{prefix_host.rsplit('.', 1)[0]}.{candidate.packed[3]}"
+                    else:
+                        ap_ip = str(candidate)
+                except ipaddress.AddressValueError:
+                    ap_ip = None
         rotate = tag_data.get("rotate")
         lut = tag_data.get("lut")
         channel = tag_data.get("ch")
