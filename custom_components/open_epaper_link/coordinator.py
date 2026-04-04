@@ -869,7 +869,7 @@ class Hub:
             action=f"update LED for {entity_id}",
             target_host=target_host,
         )
-        _LOGGER.info("Updated LED pattern for %s", entity_id)
+        _LOGGER.info("Updated LED pattern for %s via AP %s", entity_id, target_host)
 
     async def send_tag_cmd(self, entity_id: str, cmd: str) -> bool:
         mac = entity_id.split(".")[1].upper()
@@ -885,7 +885,7 @@ class Hub:
             action=f"send {cmd} to {entity_id}",
             target_host=target_host,
         )
-        _LOGGER.info("Sent %s command to %s", cmd, entity_id)
+        _LOGGER.info("Sent %s command to %s via AP %s", cmd, entity_id, target_host)
         return True
 
     async def reboot_ap(self) -> bool:

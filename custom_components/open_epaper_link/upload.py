@@ -242,9 +242,22 @@ async def upload_to_hub(hub, entity_id: str, img: bytes, dither: int, ttl: int,
     )
     url = f"http://{target_host}/imgupload"
 
-    _LOGGER.debug("Preparing upload for %s (MAC: %s)", entity_id, mac)
-    _LOGGER.debug("Upload parameters: dither=%d, ttl=%d, preload_type=%d, preload_lut=%d, lut=%d",
-                  dither, ttl, preload_type, preload_lut, lut)
+    _LOGGER.debug(
+        "Preparing upload for %s (MAC: %s) via AP %s",
+        entity_id,
+        mac,
+        target_host,
+    )
+    _LOGGER.debug(
+        "Upload parameters for %s via AP %s: dither=%d, ttl=%d, preload_type=%d, preload_lut=%d, lut=%d",
+        entity_id,
+        target_host,
+        dither,
+        ttl,
+        preload_type,
+        preload_lut,
+        lut,
+    )
 
     # Convert TTL fom seconds to minutes for the AP
     ttl_minutes = max(1, ttl // 60)
@@ -292,8 +305,12 @@ async def upload_to_hub(hub, entity_id: str, img: bytes, dither: int, ttl: int,
         except asyncio.TimeoutError:
             if attempt < MAX_RETRIES:
                 _LOGGER.warning(
-                    "Timeout uploading %s (attempt %d/%d), retrying in %ds…",
-                    entity_id, attempt, MAX_RETRIES, backoff_delay
+                    "Timeout uploading %s via AP %s (attempt %d/%d), retrying in %ds…",
+                    entity_id,
+                    target_host,
+                    attempt,
+                    MAX_RETRIES,
+                    backoff_delay,
                 )
                 await asyncio.sleep(backoff_delay)
                 backoff_delay *= 2
