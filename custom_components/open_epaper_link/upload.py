@@ -234,8 +234,13 @@ async def upload_to_hub(hub, entity_id: str, img: bytes, dither: int, ttl: int,
     Raises:
         HomeAssistantError: If upload fails or times out
     """
-    url = f"http://{hub.host}/imgupload"
     mac = entity_id.split(".")[1].upper()
+    target_host, _ = hub.resolve_tag_target_host(
+        action="imgupload",
+        entity_id=entity_id,
+        tag_mac=mac,
+    )
+    url = f"http://{target_host}/imgupload"
 
     _LOGGER.debug("Preparing upload for %s (MAC: %s)", entity_id, mac)
     _LOGGER.debug("Upload parameters: dither=%d, ttl=%d, preload_type=%d, preload_lut=%d, lut=%d",

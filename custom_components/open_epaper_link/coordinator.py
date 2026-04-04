@@ -782,8 +782,56 @@ class Hub:
                 return await func()
             return await self.hass.async_add_executor_job(func)
 
-    async def _ap_request(self, method: str, path: str, *, data=None, timeout=10, action: str) -> requests.Response:
-        url = f"http://{self.host}/{path.lstrip('/')}"
+    def resolve_tag_target_host(
+        self,
+        *,
+        action: str,
+        entity_id: str | None = None,
+        tag_mac: str | None = None,
+    ) -> tuple[str, bool]:
+        """Resolve target AP host for a tag-scoped action.
+
+        Uses the tag's stored connected_ap value when valid, otherwise falls back
+        to the main hub host.
+        """
+        resolved_tag_mac = tag_mac or (
+            entity_id.split(".")[1].upper() if entity_id and "." in entity_id else None
+        )
+        tag_data = self._data.get(resolved_tag_mac, {}) if resolved_tag_mac else {}
+        raw_connected_ap = tag_data.get("connected_ap")
+        connected_ap = normalize_ip(raw_connected_ap)
+
+        fallback_used = connected_ap is None
+        target_host = connected_ap or self.host
+        fallback_reason = None
+        raw_value_for_log = None
+        if fallback_used:
+            fallback_reason = "missing" if raw_connected_ap in (None, "") else "invalid"
+            raw_value_for_log = raw_connected_ap
+        _LOGGER.debug(
+            "Tag HTTP routing action=%s entity_id=%s tag_mac=%s target_host=%s fallback=%s fallback_reason=%s raw_connected_ap=%s",
+            action,
+            entity_id,
+            resolved_tag_mac,
+            target_host,
+            fallback_used,
+            fallback_reason,
+            raw_value_for_log,
+        )
+        return target_host, fallback_used
+
+    async def _ap_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        data=None,
+        timeout=10,
+        action: str,
+        target_host: str | None = None,
+    ) -> requests.Response:
+        request_host = target_host or self.host
+        url = f"http://{request_host}/{path.lstrip('/')}"
         def call():
             return requests.request(method, url, data=data, timeout=timeout)
         try:
@@ -810,12 +858,33 @@ class Hub:
 
     async def set_led_pattern(self, entity_id: str, pattern: str) -> None:
         mac = entity_id.split(".")[1].upper()
-        await self._ap_request("get", f"led_flash?mac={mac}&pattern={pattern}", action=f"update LED for {entity_id}")
+        target_host, _ = self.resolve_tag_target_host(
+            action="setled",
+            entity_id=entity_id,
+            tag_mac=mac,
+        )
+        await self._ap_request(
+            "get",
+            f"led_flash?mac={mac}&pattern={pattern}",
+            action=f"update LED for {entity_id}",
+            target_host=target_host,
+        )
         _LOGGER.info("Updated LED pattern for %s", entity_id)
 
     async def send_tag_cmd(self, entity_id: str, cmd: str) -> bool:
         mac = entity_id.split(".")[1].upper()
-        await self._ap_request("post", "tag_cmd", data={"mac": mac, "cmd": cmd}, action=f"send {cmd} to {entity_id}")
+        target_host, _ = self.resolve_tag_target_host(
+            action=f"tag_cmd:{cmd}",
+            entity_id=entity_id,
+            tag_mac=mac,
+        )
+        await self._ap_request(
+            "post",
+            "tag_cmd",
+            data={"mac": mac, "cmd": cmd},
+            action=f"send {cmd} to {entity_id}",
+            target_host=target_host,
+        )
         _LOGGER.info("Sent %s command to %s", cmd, entity_id)
         return True
 
