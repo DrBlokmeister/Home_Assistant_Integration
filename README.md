@@ -1,3 +1,16 @@
+> [!IMPORTANT]
+> **Placeholder / archive notice**
+>
+> This branch is a preserved snapshot of the custom fork state from before `main` is synced back to upstream (`OpenEPaperLink/Home_Assistant_Integration`).
+>
+> **Documented changes in this branch**
+> - Expanded `drawcustom` documentation ([`db42b93`](../../commit/db42b93))
+> - Improved websocket reconnect handling ([compare view](../../compare/OpenEPaperLink:main...main))
+> - Fixed image decompression and multi-block decoding issues ([`f8d9469`](../../commit/f8d9469))
+> - Centralized tag state handling across hubs ([`3398851`](../../commit/3398851))
+>
+> This branch is kept for historical reference and is not intended as the primary development branch.
+
 # OpenEPaperLink integration for Home Assistant
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?style=for-the-badge)](https://github.com/hacs/integration)
