@@ -97,7 +97,6 @@ class OpenEPaperLinkDiscoveredAPEntity(Entity):
             model=model,
             manufacturer="OpenEPaperLink",
             via_device=(DOMAIN, "ap"),
-            configuration_url=f"http://{self._hub.host}",
         )
 
     @property
