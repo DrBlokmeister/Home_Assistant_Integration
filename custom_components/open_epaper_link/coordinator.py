@@ -117,6 +117,7 @@ class Hub:
         self._ap_cmd_sem = asyncio.Semaphore(1)
         self._ap_cmd_cooldown = 0.5
         self._discovered_hubs: dict[str, dict[str, Any]] = {}
+        self._scheduled_storage_save: asyncio.TimerHandle | None = None
 
     def _update_debounce_interval(self) -> None:
         """Update event debounce intervals from integration options.
@@ -302,7 +303,27 @@ class Hub:
         self.online = False
         async_dispatcher_send(self.hass, f"{DOMAIN}_connection_status", False)
 
+        if self._scheduled_storage_save:
+            self._scheduled_storage_save.cancel()
+            self._scheduled_storage_save = None
+
         _LOGGER.debug("OpenEPaperLink hub shutdown complete")
+
+    def _schedule_storage_save(self, delay: float = SAVE_DELAY) -> None:
+        """Schedule a debounced storage write."""
+        if self._scheduled_storage_save:
+            self._scheduled_storage_save.cancel()
+
+        self._scheduled_storage_save = self.hass.loop.call_later(
+            delay,
+            self._flush_scheduled_storage_save,
+        )
+
+    @callback
+    def _flush_scheduled_storage_save(self) -> None:
+        """Flush a scheduled storage write."""
+        self._scheduled_storage_save = None
+        self.hass.async_create_task(self._store.async_save(self._build_storage_payload()))
 
     async def _websocket_handler(self) -> None:
         """Handle WebSocket connection lifecycle and process messages.
@@ -1175,7 +1196,7 @@ class Hub:
                 "discovered_hubs": self._discovered_hubs,
             })
 
-    async def _handle_ap_config_message(self,dict) -> None:
+    async def _handle_ap_config_message(self, message: dict[str, Any]) -> None:
         """Handle AP configuration updates.
 
         Fetches the current AP configuration via HTTP and updates the
@@ -1188,6 +1209,7 @@ class Hub:
         Args:
             message: The configuration message from the AP
         """
+        del message
         try:
             if self._shutdown.is_set():
                 return
@@ -1554,7 +1576,7 @@ class Hub:
             _LOGGER.info("Discovered remote AP hub %s via %s (evidence: %s)", hub_id, source, evidence_path)
             async_dispatcher_send(self.hass, SIGNAL_REMOTE_AP_DISCOVERED, hub_id)
             async_dispatcher_send(self.hass, SIGNAL_AP_UPDATE)
-            self.hass.async_create_task(self._store.async_save(self._build_storage_payload()))
+            self._schedule_storage_save()
             return
 
         updated = False
@@ -1572,7 +1594,7 @@ class Hub:
         if updated:
             _LOGGER.info("Updated remote AP hub metadata for %s via %s", hub_id, source)
             async_dispatcher_send(self.hass, SIGNAL_AP_UPDATE)
-            self.hass.async_create_task(self._store.async_save(self._build_storage_payload()))
+            self._schedule_storage_save()
 
     @staticmethod
     def _format_ap_model(ap_env: str) -> str:
