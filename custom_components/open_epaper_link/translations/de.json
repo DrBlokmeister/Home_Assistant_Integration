@@ -33,7 +33,7 @@
       "invalid_device_config": "Gerät hat ungültige Konfigurationsdaten zurückgegeben. Bitte Gerät neu konfigurieren oder die Firmware aktualisieren."
     },
     "abort": {
-      "single_instance_allowed": "Nur ein OpenEPaperLink-Hub kann konfiguriert werden. Mehrere BLE-Geräte werden unterstützt, aber nur ein AP-Hub ist erlaubt.",
+      "single_instance_allowed": "Es kann nur ein OpenEPaperLink-AP-Eintrag eingerichtet werden. Weitere Access Points lassen sich in den Optionen dieses Eintrags hinzufügen.",
       "unsupported_protocol": "Nicht unterstütztes BLE-Firmware-Protokoll. Nur ATC- und OEPL-Firmware werden unterstützt.",
       "invalid_advertising_data": "Advertising-Daten des Geräts konnten nicht analysiert werden. Bitte sicherstellen, dass das Gerät eine kompatible Firmware verwendet.",
       "no_reconfigure_ble": "BLE-Geräte unterstützen keine Neukonfiguration. Gerät entfernen und erneut hinzufügen, wenn Einstellungen geändert werden sollen.",
@@ -41,21 +41,31 @@
     }
   },
   "options": {
+    "error": {
+      "invalid_secondary_aps": "Pro Zeile eine Unicast-IPv4-Adresse eingeben.",
+      "invalid_content_aps": "Pro Zeile eine eindeutige Zuordnung MAC=IPv4 mit einer 16-stelligen Hexadezimal-MAC und einem aufgeführten weiteren Access Point eingeben."
+    },
     "step": {
       "init": {
-        "title": "Tag-Verwaltung",
-        "description": "Tags auswählen die ignoriert werden sollen.",
+        "title": "Access Points und Tags",
+        "description": "Weitere Access Points, Tag-Verhalten und Bilderzeugung konfigurieren.",
         "data": {
           "blacklisted_tags": "Ignorierte Tags",
           "button_debounce": "Tasten-Entstörzeit (Sekunden)",
           "nfc_debounce": "NFC-Entstörzeit (Sekunden)",
-          "custom_font_dirs": "Benutzerdefinierte Schriftarten-Verzeichnisse"
+          "custom_font_dirs": "Benutzerdefinierte Schriftarten-Verzeichnisse",
+          "secondary_aps": "Weitere Access Points",
+          "discover_aps": "Access Points suchen",
+          "content_aps": "Access Points für Tag-Inhalte"
         },
         "data_description": {
           "blacklisted_tags": "Tags ausblenden; geblacklistete Tags werden nicht aktualisiert und lösen keine Dienste aus.",
           "button_debounce": "Wartezeit, bevor ein weiterer Tastendruck akzeptiert wird (Sekunden).",
           "nfc_debounce": "Wartezeit, bevor ein weiterer NFC-Tap akzeptiert wird (Sekunden).",
-          "custom_font_dirs": "Kommagetrennte Verzeichnisse mit zusätzlichen Schriftarten für erzeugte Bilder."
+          "custom_font_dirs": "Kommagetrennte Verzeichnisse mit zusätzlichen Schriftarten für erzeugte Bilder.",
+          "secondary_aps": "Pro Zeile eine IPv4-Adresse eines weiteren Access Points eingeben. Ohne manuell konfigurierte Access Points leer lassen.",
+          "discover_aps": "Weitere Access Points anhand geprüfter OpenEPaperLink-Nachrichten erkennen.",
+          "content_aps": "Pro Zeile eine Zuordnung MAC=IPv4 eingeben. Die 16-stellige Tag-MAC und einen manuell konfigurierten Access Point verwenden. Tags ohne Zuordnung verwenden den primären Access Point."
         }
       }
     },
@@ -168,6 +178,13 @@
       }
     },
     "sensor": {
+      "remote_ap_connectivity": {
+        "name": "Verbindungsstatus",
+        "state": {
+          "online": "Online",
+          "offline": "Offline"
+        }
+      },
       "ip": {
         "name": "IP-Adresse"
       },
@@ -380,6 +397,12 @@
     "ble_device_not_detected": "BLE-Gerät {name} ({mac_address}) nicht im Bluetooth-Bereich erkannt.",
     "ap_cannot_connect": "Kann keine Verbindung zum AP unter {host} herstellen: {error}.",
     "ap_failed_load_tags": "Tags konnten vom AP unter {host} nicht geladen werden: {error}.",
+    "content_ap_required": {
+      "message": "Lege in den Integrationsoptionen einen Inhalts-Access-Point für Tag {tag} fest, bevor du Befehle sendest, die seinen Inhalt ändern."
+    },
+    "legacy_opendisplay_entry": {
+      "message": "Dieser Eintrag gehört zu einem älteren OpenDisplay-Gerät. Richte die separate OpenDisplay-Integration ein. Der vorhandene Eintrag wurde beibehalten."
+    },
     "ap_timeout_action": "Zeitüberschreitung bei {action}.",
     "ap_network_error_action": "Netzwerkfehler bei {action}: {error}.",
     "ap_failed_action_http": "Aktion {action} fehlgeschlagen: HTTP {status_code} - {response_text}.",

@@ -143,11 +143,16 @@ class TagNameText(OpenEPaperLinkTagEntity, TextEntity):
         if not value:
             value = self._tag_mac
         if value != self.native_value:
-            url = f"http://{self._hub.host}/save_cfg"
+            target_host, _ = self._hub.resolve_tag_target_host(
+                action="save_cfg",
+                entity_id=self.entity_id,
+                tag_mac=self._tag_mac,
+            )
+            url = f"http://{target_host}/save_cfg"
             data = {'mac': self._tag_mac, 'alias': value}
             try:
                 result = await self.hass.async_add_executor_job(
-                    lambda: requests.post(url, data=data)
+                    lambda: requests.post(url, data=data, timeout=10, allow_redirects=False)
                 )
                 if result.status_code != 200:
                     raise HomeAssistantError(

@@ -33,7 +33,7 @@
       "invalid_device_config": "O dispositivo retornou dados de configuração inválidos. Por favor, reconfigure o dispositivo ou atualize o firmware."
     },
     "abort": {
-      "single_instance_allowed": "Apenas um hub OpenEPaperLink pode ser configurado. Múltiplos dispositivos BLE são suportados, mas apenas um hub AP é permitido.",
+      "single_instance_allowed": "Apenas uma entrada de ponto de acesso OpenEPaperLink pode ser configurada. Adicione pontos de acesso adicionais nas opções dessa entrada.",
       "unsupported_protocol": "Protocolo de firmware BLE não suportado. Apenas firmware ATC são suportados.",
       "invalid_advertising_data": "Não foi possível analisar os dados de advertising do dispositivo. Por favor, certifique-se de que o dispositivo está usando firmware compatível.",
       "no_reconfigure_ble": "Dispositivos BLE não suportam reconfiguração. Remova e adicione o dispositivo novamente se precisar alterar suas definições.",
@@ -41,21 +41,31 @@
     }
   },
   "options": {
+    "error": {
+      "invalid_secondary_aps": "Introduza um endereço IPv4 unicast por linha.",
+      "invalid_content_aps": "Introduza um mapeamento MAC=IPv4 único por linha com um MAC hexadecimal de 16 caracteres e um ponto de acesso secundário da lista."
+    },
     "step": {
       "init": {
-        "title": "Gestão de Etiquetas",
-        "description": "Selecione as etiquetas para lista negra. Etiquetas na lista negra serão ocultadas e ignoradas.",
+        "title": "Pontos de acesso e etiquetas",
+        "description": "Configure pontos de acesso secundários, a gestão de etiquetas e a geração de imagens.",
         "data": {
           "blacklisted_tags": "Etiquetas na Lista Negra",
           "button_debounce": "Tempo de Debounce do Botão (segundos)",
           "nfc_debounce": "Tempo de Debounce NFC (segundos)",
-          "custom_font_dirs": "Diretórios de Fontes Personalizadas"
+          "custom_font_dirs": "Diretórios de Fontes Personalizadas",
+          "secondary_aps": "Pontos de acesso secundários",
+          "discover_aps": "Detetar pontos de acesso",
+          "content_aps": "Pontos de acesso para conteúdo das etiquetas"
         },
         "data_description": {
           "blacklisted_tags": "Tags para ocultar; tags na lista negra não serão atualizadas nem disparam serviços.",
           "button_debounce": "Atraso antes de aceitar outro acionamento do botão (segundos).",
           "nfc_debounce": "Atraso antes de aceitar outro toque NFC (segundos).",
-          "custom_font_dirs": "Diretórios separados por vírgula com fontes adicionais para imagens geradas."
+          "custom_font_dirs": "Diretórios separados por vírgula com fontes adicionais para imagens geradas.",
+          "secondary_aps": "Introduza um endereço IPv4 de um ponto de acesso secundário por linha. Deixe em branco se não configurar pontos de acesso secundários manualmente.",
+          "discover_aps": "Detete pontos de acesso secundários a partir de mensagens OpenEPaperLink verificadas.",
+          "content_aps": "Introduza um mapeamento MAC=IPv4 por linha. Use o endereço MAC de 16 caracteres da etiqueta e um ponto de acesso secundário configurado manualmente. As etiquetas sem mapeamento usam o ponto de acesso principal."
         }
       }
     },
@@ -125,6 +135,13 @@
       }
     },
     "sensor": {
+      "remote_ap_connectivity": {
+        "name": "Estado da ligação",
+        "state": {
+          "online": "Ligado",
+          "offline": "Desligado"
+        }
+      },
       "ip": {
         "name": "Endereço IP"
       },
@@ -277,6 +294,12 @@
     "ble_device_not_detected": "Dispositivo BLE {name} ({mac_address}) não detectado no alcance do Bluetooth.",
     "ap_cannot_connect": "Não foi possível conectar ao AP em {host}: {error}.",
     "ap_failed_load_tags": "Não foi possível carregar tags do AP em {host}: {error}.",
+    "content_ap_required": {
+      "message": "Defina um ponto de acesso de conteúdo para a etiqueta {tag} nas opções da integração antes de enviar comandos que alterem o seu conteúdo."
+    },
+    "legacy_opendisplay_entry": {
+      "message": "Esta entrada pertence a um dispositivo OpenDisplay antigo. Configure a integração OpenDisplay dedicada. A entrada existente foi mantida."
+    },
     "ap_timeout_action": "Tempo esgotado durante {action}.",
     "ap_network_error_action": "Erro de rede durante {action}: {error}.",
     "ap_failed_action_http": "Falha ao {action}: HTTP {status_code} - {response_text}.",

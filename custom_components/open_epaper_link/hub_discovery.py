@@ -1,79 +1,71 @@
-"""Helpers for discovering secondary AP hubs from AP payloads."""
+"""Validate access-point discovery and identify tag radio routes."""
 
-from __future__ import annotations
-
-import ipaddress
+from ipaddress import IPv4Address, IPv4Network
+import re
 from typing import Any
+
+_PRIVATE_NETWORKS = tuple(
+    IPv4Network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
+_MAC = re.compile(r"[0-9a-fA-F]{16}")
+_RF_ACTIONS = {"setled", "tag_cmd:reboot", "tag_cmd:scan", "tag_cmd:reset", "tag_cmd:deepsleep"}
 
 
 def normalize_ip(value: Any) -> str | None:
-    """Return normalized IP if value is a valid IP string."""
+    """Return a usable IPv4 address, excluding non-unicast destinations."""
     if not isinstance(value, str):
         return None
-    cleaned = value.strip()
     try:
-        return str(ipaddress.ip_address(cleaned))
+        address = IPv4Address(value.strip())
     except ValueError:
         return None
+    if address.is_unspecified or address.is_loopback or address.is_link_local or address.is_multicast or address.is_reserved:
+        return None
+    return str(address)
 
 
-def extract_remote_hub_evidence(payload: Any, main_hub_ip: str | None) -> list[dict[str, Any]]:
-    """Extract possible remote AP hub evidence from a nested payload."""
-    discovered: list[dict[str, Any]] = []
-    seen_ips: set[str] = set()
-
-    def walk(node: Any, path: str = "") -> None:
-        if isinstance(node, dict):
-            key_lower_map = {str(k).lower(): k for k in node.keys()}
-            for ip_key in ("ip", "ap_ip", "hub_ip", "remote_ip", "remoteip"):
-                if ip_key in key_lower_map:
-                    raw = node.get(key_lower_map[ip_key])
-                    ip = normalize_ip(raw)
-                    if ip and ip != main_hub_ip and ip not in seen_ips:
-                        discovered.append({
-                            "hub_id": ip,
-                            "ip": ip,
-                            "metadata": dict(node),
-                            "evidence_path": path or "$",
-                        })
-                        seen_ips.add(ip)
-
-            for key, value in node.items():
-                key_l = str(key).lower()
-                child_path = f"{path}.{key}" if path else str(key)
-                if isinstance(value, str):
-                    ip_value = normalize_ip(value)
-                    if (
-                        ip_value
-                        and ip_value != main_hub_ip
-                        and ip_value not in seen_ips
-                        and any(token in key_l for token in ("hub", "ap", "remote", "ip"))
-                    ):
-                        discovered.append({
-                            "hub_id": ip_value,
-                            "ip": ip_value,
-                            "metadata": {"field": key, "value": value},
-                            "evidence_path": child_path,
-                        })
-                        seen_ips.add(ip_value)
-                walk(value, child_path)
-        elif isinstance(node, list):
-            for idx, item in enumerate(node):
-                walk(item, f"{path}[{idx}]")
-
-    walk(payload)
-    return discovered
+def normalize_mac(value: Any) -> str | None:
+    """Return the canonical MAC used for AP tag identifiers."""
+    return value.upper() if isinstance(value, str) and _MAC.fullmatch(value) else None
 
 
-def resolve_connected_ap(
-    apip: Any,
-    main_hub_ip: str | None,
-    fallback_host: str | None = None,
-) -> tuple[str | None, str | None]:
-    """Resolve tag connected AP from explicit apip field."""
-    normalized = normalize_ip(apip)
-    if isinstance(apip, str) and apip.strip() == "0.0.0.0":
-        return main_hub_ip or fallback_host, "tag.apip_zero_fallback_main_hub"
-    if normalized is None:
-        return None, None
-    return normalized, "tag.apip"
+def same_discovery_network(source: str | None, candidate: str) -> bool:
+    """Limit automatic probing to the reporter's private IPv4 /24."""
+    if not normalize_ip(source) or not normalize_ip(candidate):
+        return False
+    address = IPv4Address(candidate)
+    network = IPv4Network(f"{source}/24", strict=False)
+    return (
+        address in network
+        and address not in (network.network_address, network.broadcast_address)
+        and any(address in private for private in _PRIVATE_NETWORKS)
+    )
+
+
+def discovery_candidate(item: Any) -> str | None:
+    """Accept the AP list frame emitted by the firmware, not arbitrary IP fields."""
+    if (
+        not isinstance(item, dict)
+        or not isinstance(item.get("alias"), str)
+        or type(item.get("count")) is not int
+        or type(item.get("channel")) is not int
+        or not isinstance(item.get("version"), str)
+    ):
+        return None
+    return normalize_ip(item.get("ip"))
+
+
+def resolve_connected_ap(apip: Any, reporter: str, is_external: Any) -> tuple[str | None, str | None]:
+    """Identify the radio from a local report or an external report's AP address."""
+    if is_external in (False, 0) or (apip == "0.0.0.0" and is_external is None):
+        return reporter, "local"
+    if is_external in (True, 1):
+        address = normalize_ip(apip)
+        if address:
+            return address, "tag.apip"
+    return None, None
+
+
+def uses_radio(action: str) -> bool:
+    """Return whether the firmware sends the operation over the tag radio."""
+    return action in _RF_ACTIONS

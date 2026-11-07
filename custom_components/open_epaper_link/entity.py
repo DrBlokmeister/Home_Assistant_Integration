@@ -8,7 +8,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, Entity
 from .ble import BLEDeviceMetadata
 
-from .const import DOMAIN, ATC_CONFIG_URL
+from .const import DOMAIN, ATC_CONFIG_URL, SIGNAL_AP_UPDATE
 from .tag_types import get_hw_string, get_hw_dimensions
 
 if TYPE_CHECKING:
@@ -101,8 +101,8 @@ class OpenEPaperLinkDiscoveredAPEntity(Entity):
 
     @property
     def available(self) -> bool:
-        """Discovered AP entities are available when main hub is online."""
-        return self._hub.online
+        """Keep remote AP diagnostics available when the AP goes offline."""
+        return self._hub.get_discovered_hub(self._hub_id).get("hub_id") == self._hub_id
 
     async def async_added_to_hass(self) -> None:
         """Register update signals."""
@@ -116,7 +116,7 @@ class OpenEPaperLinkDiscoveredAPEntity(Entity):
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
-                f"{DOMAIN}_ap_update",
+                SIGNAL_AP_UPDATE,
                 self._handle_update,
             )
         )
@@ -136,7 +136,7 @@ class OpenEPaperLinkTagEntity(Entity):
 
     Provides:
     - device_info for tag device
-    - available property (hub.online + tag online + not blacklisted)
+    - availability based on the tag's AP, freshness, and blacklist
     - Signal registration for tag updates and connection status
     - Common callbacks for state updates
 
@@ -177,7 +177,7 @@ class OpenEPaperLinkTagEntity(Entity):
     def available(self) -> bool:
         """Return if the entity is available."""
         return (
-                self._hub.online
+                self._hub.is_tag_ap_online(self._tag_mac)
                 and self._hub.is_tag_online(self._tag_mac)
                 and self._tag_mac not in self._hub.get_blacklisted_tags()
         )

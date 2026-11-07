@@ -2,11 +2,13 @@ from __future__ import annotations
 
 PARALLEL_UPDATES = 0
 
+import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Final
-import requests
 
+import aiohttp
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from .util import is_ble_entry
 from .entity import OpenEPaperLinkTagEntity, OpenEPaperLinkBLEEntity
@@ -134,7 +136,11 @@ class ESLImage(OpenEPaperLinkTagEntity, ImageEntity):
         self._cached_image: bytes | None = None
         self._last_updated: datetime | None = None
         self._tag_type = None
-        self._last_error = None
+        self._image_hosts: tuple[str, ...] = ()
+        self._refresh_pending = True
+        self._image_generation = 0
+        self._refresh_lock = asyncio.Lock()
+        self._refresh_task: asyncio.Task | None = None
 
     @property
     def available(self) -> bool:
@@ -149,21 +155,26 @@ class ESLImage(OpenEPaperLinkTagEntity, ImageEntity):
         """Return the last updated image timestamp."""
         return self._last_updated
 
-    async def _fetch_raw_image(self) -> bytes | None:
-        """Fetch raw image data from AP."""
-        url = f"http://{self._hub.host}/current/{self._tag_mac}.raw"
+    async def _fetch_raw_image(self, hosts: tuple[str, ...]) -> bytes | None:
+        """Try the trusted preview sources in routing order."""
+        session = async_get_clientsession(self.hass)
         try:
-            result = await self.hass.async_add_executor_job(lambda: requests.get(url))
-            if result.status_code == 200:
-                return result.content
-            if result.status_code == 404:
-                _LOGGER.debug("No image found for %s", self._tag_mac)
-                return None
-            _LOGGER.error("Failed to fetch image for %s: HTTP %d", self._tag_mac, result.status_code)
-            return None
-        except Exception as err:
-            _LOGGER.error("Error fetching image for %s: %s", self._tag_mac, str(err))
-            return None
+            async with asyncio.timeout(10):
+                for host in hosts:
+                    try:
+                        async with session.get(
+                            f"http://{host}/current/{self._tag_mac}.raw",
+                            timeout=aiohttp.ClientTimeout(total=4),
+                            allow_redirects=False,
+                        ) as response:
+                            if response.status == 200:
+                                if raw := await response.read():
+                                    return raw
+                    except (aiohttp.ClientError, TimeoutError) as err:
+                        _LOGGER.debug("Preview source unavailable for %s: %s", self._tag_mac, err)
+        except TimeoutError:
+            _LOGGER.debug("Timed out fetching preview for %s", self._tag_mac)
+        return None
 
     async def _get_tag_def(self) -> TagType | None:
         """Get tag definition for image decoding."""
@@ -184,37 +195,36 @@ class ESLImage(OpenEPaperLinkTagEntity, ImageEntity):
         return self._tag_type
 
     async def async_image(self) -> bytes | None:
-        """Return cached image bytes, fetching if needed."""
-        if self._cached_image is None:
-            await self._refresh_image()
+        """Return the last successful preview, refreshing if needed."""
+        await self._refresh_image()
         return self._cached_image
 
     async def _refresh_image(self) -> None:
         """Refresh the cached image data."""
-        try:
-            raw_data = await self._fetch_raw_image()
-            if raw_data:
-                tag_def = await self._get_tag_def()
-                if tag_def:
-                    try:
-                        jpeg_data = await self.hass.async_add_executor_job(
-                            lambda: to_image(raw_data, tag_def)
-                        )
-                        self._cached_image = jpeg_data
-                        self._last_updated = datetime.now()
-                        self.async_write_ha_state()
-                    except Exception as err:
-                        _LOGGER.error("Error decoding image for %s: %s", self._tag_mac, str(err))
-                        self._cached_image = None
-            else:
-                self._cached_image = None
-        except Exception as err:
-            _LOGGER.error("Error refreshing image for %s: %s", self._tag_mac, str(err))
-            self._cached_image = None
+        async with self._refresh_lock:
+            hosts = self._hub.image_hosts(self._tag_mac)
+            if not hosts or (not self._refresh_pending and hosts == self._image_hosts):
+                return
+            self._image_hosts = hosts
+            generation = self._image_generation
+            raw_data = await self._fetch_raw_image(hosts)
+            if not raw_data:
+                return
+            tag_def = await self._get_tag_def()
+            if tag_def is None:
+                return
+            try:
+                jpeg_data = await self.hass.async_add_executor_job(to_image, raw_data, tag_def)
+            except Exception as err:
+                _LOGGER.error("Error decoding image for %s: %s", self._tag_mac, err)
+                return
+            if generation == self._image_generation and hosts == self._hub.image_hosts(self._tag_mac):
+                self._store_image(jpeg_data)
+                self._refresh_pending = False
 
     async def async_added_to_hass(self) -> None:
         """Register callback when entity is added."""
-        # Don't call super() - different signals are used for image updates
+        await super().async_added_to_hass()
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
@@ -222,25 +232,53 @@ class ESLImage(OpenEPaperLinkTagEntity, ImageEntity):
                 self._handle_tag_image_update
             )
         )
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                f"{DOMAIN}_connection_status",
-                self._handle_connection_status
-            )
-        )
+        self.async_on_remove(self._cancel_refresh)
+
+    @callback
+    def _handle_update(self) -> None:
+        """Refresh when tag routing changes."""
+        super()._handle_update()
+        self._refresh_if_hosts_changed()
+
+    @callback
+    def _handle_connection_status(self, is_online: bool) -> None:
+        """Refresh when AP connectivity changes the preview sources."""
+        super()._handle_connection_status(is_online)
+        self._refresh_if_hosts_changed()
+
+    @callback
+    def _refresh_if_hosts_changed(self) -> None:
+        hosts = self._hub.image_hosts(self._tag_mac)
+        if hosts != self._image_hosts:
+            self._image_hosts = hosts
+            self._handle_tag_image_update(True)
+
+    @callback
+    def _cancel_refresh(self) -> None:
+        self._image_generation += 1
+        if self._refresh_task is not None:
+            self._refresh_task.cancel()
+
+    @callback
+    def _store_image(self, data: bytes) -> None:
+        if data != self._cached_image:
+            self._cached_image = data
+            self._last_updated = datetime.now(timezone.utc)
+            self.async_write_ha_state()
 
     @callback
     def _handle_tag_image_update(self, data) -> None:
         """Handle tag image updates."""
+        if not data:
+            return
+        self._cancel_refresh()
         if isinstance(data, bytes):
-            self._cached_image = data
-            self._last_updated = datetime.now()
-            self.async_write_ha_state()
-        elif data:
-            self.hass.async_create_task(self._refresh_image())
-            self.async_write_ha_state()
-        self.async_write_ha_state()
+            self._image_hosts = self._hub.image_hosts(self._tag_mac)
+            self._refresh_pending = False
+            self._store_image(data)
+        else:
+            self._refresh_pending = True
+            self._refresh_task = self.hass.async_create_task(self._refresh_image())
 
 
 class OpenEPaperLinkBLEImage(OpenEPaperLinkBLEEntity, ImageEntity):

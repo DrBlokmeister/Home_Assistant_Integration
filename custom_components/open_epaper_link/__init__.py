@@ -7,7 +7,7 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform, EVENT_HOMEASSISTANT_STARTED, CONF_HOST
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 from homeassistant.helpers import entity_registry as er, device_registry as dr, storage
 from homeassistant.const import __version__ as HA_VERSION
 from homeassistant.helpers.typing import ConfigType
@@ -230,36 +230,6 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the OpenEPaperLink integration."""
 
-    # Remove any OpenDisplay (OEPL BLE) config entries — support has been removed.
-    # OpenDisplay now has its own dedicated HA integration.
-    oepl_entries = [
-        entry for entry in hass.config_entries.async_entries(DOMAIN)
-        if entry.data.get("protocol_type") == "oepl"
-    ]
-    if oepl_entries:
-        removed_names = [
-            entry.data.get("name", entry.data.get("mac_address", entry.entry_id))
-            for entry in oepl_entries
-        ]
-        for entry in oepl_entries:
-            await hass.config_entries.async_remove(entry.entry_id)
-        _LOGGER.info("Removed %d OpenDisplay (OEPL BLE) config entries: %s", len(removed_names), removed_names)
-
-        from homeassistant.components import persistent_notification
-        persistent_notification.async_create(
-            hass,
-            message=(
-                "The following OpenDisplay (OEPL BLE) devices were removed from "
-                "OpenEPaperLink because OpenDisplay now has its own dedicated integration:\n\n"
-                + "\n".join(f"- {name}" for name in removed_names)
-                + "\n\nTo continue using these devices:\n"
-                "- Use the [**official core**](https://www.home-assistant.io/integrations/opendisplay) integration to send images to the display via the `upload_image` action.\n"
-                "- Use the [**Custom integration**](https://github.com/OpenDisplay/Home_Assistant_Integration) if you need to use the `drawcustom` action."
-            ),
-            title="OpenDisplay devices removed",
-            notification_id="open_epaper_link_opendisplay_removed",
-        )
-
     # Services should be set up unconditionally
     await async_setup_services(hass)
     return True
@@ -293,6 +263,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenEPaperLinkConfigEntr
         name = entry.data.get("name")
         device_metadata = entry.data.get("device_metadata", {})
         protocol_type = entry.data.get("protocol_type", "atc")  # Default to ATC for backward compatibility
+
+        if protocol_type == "oepl":
+            raise ConfigEntryError(
+                translation_domain=DOMAIN, translation_key="legacy_opendisplay_entry"
+            )
 
         # Get protocol handler for this device
         protocol = get_protocol_by_name(protocol_type)
@@ -425,8 +400,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenEPaperLinkConfigEntr
 
         hub = Hub(hass, entry)
 
-        # Do basic setup without WebSocket connection
-        # Raises ConfigEntryNotReady if AP is unreachable
+        # Restore stored tags before forwarding platforms.
         await hub.async_setup_initial()
 
         entry.runtime_data = hub
@@ -458,7 +432,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenEPaperLinkConfigEntr
             await hub.async_start_websocket()
         else:
             # Otherwise wait for the started event
-            hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, start_websocket)
+            entry.async_on_unload(
+                hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, start_websocket)
+            )
 
 
     # Listen for changes to options

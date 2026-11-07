@@ -8,7 +8,6 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ServiceValidationError, HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from .coordinator import Hub
 from .ble import BLEConnectionError, BLETimeoutError, BLEProtocolError
 from .const import DOMAIN, SIGNAL_TAG_IMAGE_UPDATE
 from .imagegen import ImageGen
@@ -127,19 +126,6 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         )
 
 
-    def require_hub_online(func: Callable) -> Callable:
-        """Decorator to require the AP to be online before executing a service."""
-        @wraps(func)
-        async def wrapper(service: ServiceCall, *args, **kwargs) -> None:
-            hub = get_hub_from_hass(hass)
-            if not hub.online:
-                raise HomeAssistantError(
-                    translation_domain=DOMAIN,
-                    translation_key="ap_offline",
-                )
-            return await func(service, *args, hub=hub, **kwargs)
-        return wrapper
-
     def handle_targets(func: Callable) -> Callable:
         """Decorator to handle device_id, label_id, and area_id targeting."""
         @wraps(func)
@@ -186,7 +172,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                 try:
                     entity_id = await get_entity_id_from_device_id(device_id)
                     await func(service, entity_id, *args, **kwargs)
-                except ServiceValidationError as err:
+                except HomeAssistantError as err:
                     errors.append((device_id, str(err)))
 
                 # Wait for all queued uploads to complete
@@ -234,16 +220,6 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
         try:
             is_ble = is_ble_device(hass, entity_id)
-
-            # For hub devices, ensure hub is online
-            hub = None
-            if not is_ble:
-                hub = get_hub_from_hass(hass)
-                if not hub.online:
-                    raise HomeAssistantError(
-                        translation_domain=DOMAIN,
-                        translation_key="ap_offline",
-                    )
 
             # Generate image
             generator = ImageGen(hass)
@@ -302,6 +278,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                 # Determine upload method
                 await ble_upload_queue.add_to_queue(upload_to_ble_block, hass, entity_id, image_data, dither)
             else:
+                hub = get_hub_from_hass(hass)
                 # Map refresh_type to AP's lut parameter
                 # 0→1 (full), 1→3 (fast), 2→2 (fast no-reds), 3→0 (no-repeats)
                 ap_lut_mapping = {0: 1, 1: 3, 2: 2, 3: 0}
@@ -328,40 +305,40 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
 
 
-    @require_hub_online
     @handle_targets
-    async def setled_service(service: ServiceCall, entity_id: str, hub: Hub) -> None:
+    async def setled_service(service: ServiceCall, entity_id: str) -> None:
         pattern = _build_led_pattern(service.data)
 
-        await hub.set_led_pattern(entity_id, pattern)
+        await get_hub_from_hass(hass).set_led_pattern(entity_id, pattern)
 
-    @require_hub_online
     @handle_targets
-    async def clear_pending_service(service: ServiceCall, entity_id: str, hub: Hub) -> None:
+    async def clear_pending_service(service: ServiceCall, entity_id: str) -> None:
         """Clear pending updates for target devices."""
-        await hub.send_tag_cmd(entity_id, "clear")
+        await get_hub_from_hass(hass).send_tag_cmd(entity_id, "clear")
 
-    @require_hub_online
     @handle_targets
-    async def force_refresh_service(service: ServiceCall, entity_id: str, hub: Hub) -> None:
+    async def force_refresh_service(service: ServiceCall, entity_id: str) -> None:
         """Force refresh target devices."""
-        await hub.send_tag_cmd(entity_id, "refresh")
+        await get_hub_from_hass(hass).send_tag_cmd(entity_id, "refresh")
 
-    @require_hub_online
     @handle_targets
-    async def reboot_tag_service(service: ServiceCall,entity_id: str, hub: Hub) -> None:
+    async def reboot_tag_service(service: ServiceCall, entity_id: str) -> None:
         """Reboot target devices."""
-        await hub.send_tag_cmd(entity_id, "reboot")
+        await get_hub_from_hass(hass).send_tag_cmd(entity_id, "reboot")
 
-    @require_hub_online
     @handle_targets
-    async def scan_channels_service(service: ServiceCall, entity_id: str, hub: Hub) -> None:
+    async def scan_channels_service(service: ServiceCall, entity_id: str) -> None:
         """Trigger channel scan on target devices."""
-        await hub.send_tag_cmd(entity_id, "scan")
+        await get_hub_from_hass(hass).send_tag_cmd(entity_id, "scan")
 
-    @require_hub_online
-    async def reboot_ap_service(service: ServiceCall, hub: Hub) -> None:
+    async def reboot_ap_service(service: ServiceCall) -> None:
         """Reboot the Access Point."""
+        hub = get_hub_from_hass(hass)
+        if not hub.online:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="ap_offline",
+            )
         await hub.reboot_ap()
 
     async def refresh_tag_types_service(service: ServiceCall) -> None:

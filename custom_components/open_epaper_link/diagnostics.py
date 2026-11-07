@@ -7,15 +7,26 @@ from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import CONF_CONTENT_APS, CONF_SECONDARY_APS
 from .coordinator import Hub
 from .runtime_data import OpenEPaperLinkConfigEntry, OpenEPaperLinkBLERuntimeData
 
 # Sensitive fields to redact
 TO_REDACT = {
     CONF_HOST,  # AP IP address
+    CONF_CONTENT_APS,
+    CONF_SECONDARY_APS,
     "wifi_ssid",  # WiFi network name
     "ip",  # AP IP in status
+    "blacklisted_tags",
+    "connected_ap",
+    "content_ap",
+    "content_reporter",
+    "reporter",
+    "radio_ap",
+    "reporter_ap",
+    "reporting_ap",
+    "apip",
 }
 
 
@@ -44,7 +55,7 @@ def _redact_tag_data(tags: dict[str, dict]) -> dict[str, dict]:
     result = {}
     for mac, data in tags.items():
         redacted_mac = _redact_mac(mac)
-        redacted_data = dict(data)
+        redacted_data = async_redact_data(data, TO_REDACT)
         redacted_data["tag_mac"] = redacted_mac
         if "tag_name" in redacted_data:
             redacted_data["tag_name"] = _redact_name_if_mac(redacted_data["tag_name"], mac)
@@ -95,7 +106,21 @@ async def async_get_config_entry_diagnostics(
                 mac: hub.get_tag_data(mac) for mac in hub.tags
             }),
         }
-        diag["discovered_hubs"] = async_redact_data(hub.get_discovered_hubs(), TO_REDACT)
+        # The source mapping is keyed by AP address and can contain raw payload metadata.
+        configured_aps = entry.options.get(CONF_SECONDARY_APS, ())
+        diag["discovered_hubs"] = [
+            {
+                "online": record.get("online", False),
+                "configured": host in configured_aps,
+                "last_seen": record.get("last_seen"),
+                "status": {
+                    key: value
+                    for key, value in record.get("status", {}).items()
+                    if type(value) is int
+                },
+            }
+            for host, record in hub.get_discovered_hubs().items()
+        ]
 
     elif isinstance(runtime_data, OpenEPaperLinkBLERuntimeData):
         # BLE device entry

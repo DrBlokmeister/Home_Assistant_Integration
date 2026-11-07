@@ -1,26 +1,42 @@
 import asyncio
 import inspect
+import socket
+from urllib.parse import urlsplit
 from datetime import datetime, timedelta, timezone
 from typing import Final, Dict, Any, Callable, Awaitable
 
 import json
 import requests
 import aiohttp
-import async_timeout
-import websockets
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant, CALLBACK_TYPE, callback
 from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers import device_registry as dr
-from homeassistant.helpers import entity_registry as er
 import logging
 
-from .const import DOMAIN, SIGNAL_AP_UPDATE, SIGNAL_TAG_UPDATE, SIGNAL_TAG_IMAGE_UPDATE, SIGNAL_REMOTE_AP_DISCOVERED
-from .hub_discovery import extract_remote_hub_evidence, normalize_ip, resolve_connected_ap
+from .ap_connections import APConnections
+from .const import (
+    CONF_CONTENT_APS,
+    CONF_DISCOVER_APS,
+    CONF_SECONDARY_APS,
+    DOMAIN,
+    SIGNAL_AP_UPDATE,
+    SIGNAL_REMOTE_AP_DISCOVERED,
+    SIGNAL_TAG_IMAGE_UPDATE,
+    SIGNAL_TAG_UPDATE,
+)
+from .hub_discovery import (
+    discovery_candidate,
+    normalize_ip,
+    normalize_mac,
+    resolve_connected_ap,
+    same_discovery_network,
+    uses_radio,
+)
 from .tag_types import get_tag_types_manager, get_hw_string
 
 _LOGGER: Final = logging.getLogger(__name__)
@@ -28,10 +44,10 @@ _LOGGER: Final = logging.getLogger(__name__)
 
 STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}_tags"
-RECONNECT_INTERVAL = 30
 SAVE_DELAY = 10
-WEBSOCKET_TIMEOUT = 60
-CONNECTION_TIMEOUT = 10
+AP_HTTP_TIMEOUT = 5
+MAX_DISCOVERED_APS = 16
+REPLICA_CLOCK_SKEW = 5
 
 
 
@@ -85,13 +101,25 @@ class Hub:
         self.entry = entry
         self.host = entry.data["host"]
         self._main_hub_ip = normalize_ip(self.host)
-        self._ws_task: asyncio.Task | None = None
-        self._ws_client: websockets.WebSocketClientProtocol | None = None
-        self._cleanup_task: asyncio.Task | None = None
-        self._shutdown = asyncio.Event()
-        self._session = async_get_clientsession(hass)
+        # aiohttp's ws_connect follows redirects unless they are intercepted.
+        trace = aiohttp.TraceConfig()
+        trace.on_request_redirect.append(self._reject_ap_redirect)
+        self._session = async_create_clientsession(hass, trace_configs=[trace])
         self._shutdown_handler: CALLBACK_TYPE | None = None
-        self._shutdown = asyncio.Event()
+        self._connections = APConnections(
+            self._session,
+            on_message=self._handle_message,
+            on_connection=self._handle_connection,
+            on_ready=self._initialize_ap,
+            verify=self._verify_connection,
+            create_task=lambda coro, name: entry.async_create_background_task(
+                hass, coro, name, eager_start=False
+            ),
+        )
+        self._closing = False
+        self._running = False
+        self._dirty = False
+        self._save_scheduled = False
         self._store = Store[dict[str, any]](
             hass, STORAGE_VERSION, STORAGE_KEY, private=True, atomic_writes=True
         )
@@ -99,15 +127,11 @@ class Hub:
         self._ap_data: dict[str, any] = {}
         self.ap_config: dict[str, any] = {}
         self._known_tags: set[str] = set()
-        self._last_record_count = None
+        self._tag_keys: dict[str, str] = {}
         self.ap_env = None
         self.ap_model = "ESP32"
 
-        self._unsub_callbacks: list[CALLBACK_TYPE] = []
-        self.online = False
-        self._reconnect_task: asyncio.Task | None = None
         self._tag_manager = None
-        self._tag_manager_ready = asyncio.Event()
         self._blacklisted_tags = entry.options.get("blacklisted_tags", [])
         self._last_button_press: Dict[str, datetime] = {}
         self._button_debounce_interval = timedelta(seconds=0.5)
@@ -117,7 +141,11 @@ class Hub:
         self._ap_cmd_sem = asyncio.Semaphore(1)
         self._ap_cmd_cooldown = 0.5
         self._discovered_hubs: dict[str, dict[str, Any]] = {}
-        self._scheduled_storage_save: asyncio.TimerHandle | None = None
+        self._secondary_status: dict[str, dict[str, Any]] = {}
+        self._verified_peers: set[str] = set()
+        self._probe_after: dict[str, float] = {}
+        self._topology_lock = asyncio.Lock()
+        self._shutdown_lock = asyncio.Lock()
 
     def _update_debounce_interval(self) -> None:
         """Update event debounce intervals from integration options.
@@ -135,360 +163,275 @@ class Hub:
         self._nfc_debounce_interval = timedelta(seconds=nfc_debounce_seconds)
 
     async def async_reload_config(self) -> None:
-        """Reload configuration from config entry.
-
-        Updates hub settings based on changes to the config entry options:
-
-        - Reloads the tag blacklist
-        - Updates debounce intervals for buttons and NFC
-
-        This is called when the integration options are updated through
-        the configuration flow.
-        """
+        """Apply options without recreating the entry or its devices."""
         await self.async_reload_blacklist()
         self._update_debounce_interval()
+        if self._running:
+            await self._sync_connections()
+
+    @property
+    def online(self) -> bool:
+        """Return the primary AP's connection status."""
+        return self._connections.online(self.host)
+
+    def _connection_host(self, host: str) -> str:
+        return self.host if host == self._main_hub_ip else host
+
+    def is_ap_online(self, host: str | None) -> bool:
+        """Report the current session state of the given AP."""
+        return bool(host and self._connections.online(self._connection_host(host)))
+
+    def is_tag_ap_online(self, tag_mac: str) -> bool:
+        """Check the known radio session, with legacy relay for untracked APs."""
+        radio = self.get_tag_data(tag_mac).get("connected_ap")
+        if radio and self._connection_host(radio) in self._connections.hosts:
+            return self.is_ap_online(radio)
+        return self.online
+
+    def _manual_peers(self) -> set[str]:
+        return {
+            host
+            for value in self.entry.options.get(CONF_SECONDARY_APS, ())
+            if (host := normalize_ip(value)) and host != self._main_hub_ip
+        }
+
+    def _discovery_enabled(self) -> bool:
+        return self.entry.options.get(CONF_DISCOVER_APS, True)
+
+    async def _resolve_primary_ip(self) -> None:
+        if self._main_hub_ip:
+            return
+        host = urlsplit(f"http://{self.host}").hostname
+        if not host:
+            return
+        try:
+            async with asyncio.timeout(AP_HTTP_TIMEOUT):
+                records = await self.hass.loop.getaddrinfo(host, None, family=socket.AF_INET)
+        except (OSError, TimeoutError):
+            return
+        addresses = {record[4][0] for record in records}
+        if len(addresses) == 1:
+            self._main_hub_ip = normalize_ip(addresses.pop())
 
     async def async_setup_initial(self) -> None:
-        """Set up hub without establishing a WebSocket connection.
-
-        Performs the initial setup tasks:
-
-        - Loads stored tag data from persistent storage
-        - Initializes the tag type manager
-        - Registers the shutdown handler
-        - Fetches AP info and loads tags from the AP
-
-        This is called during integration setup before the platforms
-        are loaded, allowing entities to be created with initial state.
-
-        Raises:
-            ConfigEntryNotReady: If AP is unreachable or tag loading fails
-        """
-        # Load stored data
+        """Restore the original stores before Home Assistant adds entities."""
         stored = await self._store.async_load()
         if stored:
             self._data = stored.get("tags", {})
-            self._known_tags = set(self._data.keys())
+            self._known_tags = set(self._data)
+            self._tag_keys = {mac.upper(): mac for mac in self._data}
             self._discovered_hubs = stored.get("discovered_hubs", {})
-            _LOGGER.debug("Restored %d tags from storage", len(self._known_tags))
-            if self._discovered_hubs:
-                _LOGGER.debug("Restored %d discovered remote AP hubs from storage", len(self._discovered_hubs))
 
-        # Initialize tag manager
         self._tag_manager = await get_tag_types_manager(self.hass)
-        self._tag_manager_ready.set()
-
-        # Register shutdown handler only once
-        if self._shutdown_handler is None:
-            self._shutdown_handler = self.hass.bus.async_listen_once(
-                EVENT_HOMEASSISTANT_STOP,
-                self._handle_shutdown
+        await self._resolve_primary_ip()
+        manual_peers = self._manual_peers()
+        self._verified_peers = self._stored_peers(manual_peers)
+        # Existing tags can load while APs are offline and reconnect in the background.
+        if not self._data:
+            results = await asyncio.gather(
+                *(self._probe_ap(host) for host in (
+                    self.host, *sorted(manual_peers | self._verified_peers)
+                )),
             )
+            if not any(results):
+                raise ConfigEntryNotReady(
+                    translation_domain=DOMAIN,
+                    translation_key="ap_cannot_connect",
+                    translation_placeholders={"host": self.host, "error": "No configured AP responded"},
+                )
+        else:
+            # The AP model must be known before the primary device is registered when reachable.
+            await self._probe_ap(self.host)
 
-        # Fetch AP info - raises on failure (timeout, connection error, HTTP error)
-        try:
-            await self.async_update_ap_info()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-            raise ConfigEntryNotReady(
-                translation_domain=DOMAIN,
-                translation_key="ap_cannot_connect",
-                translation_placeholders={"host": self.host, "err": str(err)},
-            ) from err
-
-        # Load tags from AP - already has 10 retries built-in
-        # If this fails after retries, something is wrong with the AP
-        try:
-            await self.async_load_all_tags()
-        except Exception as err:
-            raise ConfigEntryNotReady(
-                translation_domain=DOMAIN,
-                translation_key="ap_failed_load_tags",
-                translation_placeholders={"host": self.host, "err": str(err)},
-            ) from err
-
-    async def async_start_websocket(self) -> bool:
-        """Start WebSocket connection to the AP.
-
-        Establishes the WebSocket connection for real-time updates from the AP.
-        If a previous connection exists, it's cancelled before starting a new one.
-
-        The method waits for the connection to be established or for the
-        CONNECTION_TIMEOUT to expire before returning.
-
-        Returns:
-            bool: True if connection was successfully established, False otherwise
-        """
-        if self._ws_task and not self._ws_task.done():
-            self._ws_task.cancel()
-            try:
-                await self._ws_task
-            except asyncio.CancelledError:
-                pass
-
-        # Clear the shutdown flag when starting
-        self._shutdown.clear()
-
-        self._ws_task = self.hass.async_create_task(
-            self._websocket_handler(),
-            "open_epaper_link_websocket"
+    async def async_start_websocket(self) -> None:
+        """Start one independently reconnecting task for each active AP."""
+        if self._closing or self._running:
+            return
+        self._shutdown_handler = self.hass.bus.async_listen_once(
+            EVENT_HOMEASSISTANT_STOP, self._handle_shutdown
         )
+        self._running = True
+        await self._sync_connections()
 
-        # Wait briefly to ensure connection is established
-        try:
-            async with async_timeout.timeout(CONNECTION_TIMEOUT):
-                while not self.online and not self._shutdown.is_set():
-                    await asyncio.sleep(0.1)
+    async def _sync_connections(self) -> None:
+        async with self._topology_lock:
+            if self._closing:
+                return
+            manual = self._manual_peers()
+            allowed = {self.host, *manual}
+            self._verified_peers = self._stored_peers(manual)
+            allowed.update(self._verified_peers)
+            for host in self._connections.hosts - allowed:
+                await self._connections.remove(host)
+            if self._closing:
+                return
+            for host in sorted(allowed):
+                if host in manual and host not in self._discovered_hubs:
+                    self._upsert_discovered_hub({"hub_id": host, "ip": host}, "configured")
+                self._connections.start(host)
 
-                if not self.online:
-                    _LOGGER.error("Failed to establish WebSocket connection")
-                    return False
-
-                _LOGGER.info("WebSocket connection established successfully")
-                return True
-
-        except asyncio.TimeoutError:
-            _LOGGER.error("Timeout while establishing WebSocket connection")
-            return False
-
-
-    async def _handle_shutdown(self, _) -> None:
-        """Handle Home Assistant shutdown event.
-
-        Called when Home Assistant is shutting down, this method:
-
-        - Triggers a clean shutdown of the Hub
-        - Clears the shutdown handler reference
-
-        Args:
-            _: Event object (unused)
-        """
-        _LOGGER.debug("Processing shutdown for OpenEPaperLink hub")
+    async def _handle_shutdown(self, _event) -> None:
         await self.shutdown()
-        self._shutdown_handler = None
 
     async def shutdown(self) -> None:
-        """Shut down the hub and clean up resources.
+        """Stop all AP sessions and flush pending writes before a reload."""
+        async with self._shutdown_lock:
+            if self._closing:
+                return
+            self._closing = True
+            if self._shutdown_handler is not None:
+                self._shutdown_handler()
+                self._shutdown_handler = None
+            await self._connections.stop()
+            if self._dirty:
+                await self._store.async_save(self._build_storage_payload())
 
-        Performs a graceful shutdown of the hub:
+    def _schedule_storage_save(self) -> None:
+        self._dirty = True
+        if not self._save_scheduled:
+            self._save_scheduled = True
+            self._store.async_delay_save(self._delayed_storage_payload, SAVE_DELAY)
 
-        - Sets shutdown flag to prevent new connection attempts
-        - Cancels any active WebSocket connection task
-        - Removes event listeners and callbacks
-        - Updates connection status for dependent entities
+    def _delayed_storage_payload(self) -> dict[str, Any]:
+        self._save_scheduled = False
+        return self._build_storage_payload()
 
-        This should be called when unloading the integration.
-        """
-        _LOGGER.debug("Shutting down OpenEPaperLink hub")
+    async def _read_ap_json(self, host: str, path: str, **kwargs) -> dict:
+        async with asyncio.timeout(AP_HTTP_TIMEOUT):
+            async with self._session.get(
+                f"http://{host}/{path}", allow_redirects=False, **kwargs
+            ) as response:
+                if response.status != 200:
+                    raise ValueError(f"HTTP {response.status} for /{path}")
+                data = await response.json()
+        if not isinstance(data, dict):
+            raise ValueError(f"Invalid JSON object from /{path}")
+        return data
 
-        # Set shutdown flag first
-        self._shutdown.set()
+    @staticmethod
+    async def _reject_ap_redirect(_session, _context, _params) -> None:
+        raise aiohttp.ClientError("OpenEPaperLink AP redirects are unsupported")
 
-        # Cancel WebSocket task
-        if self._ws_task and not self._ws_task.done():
-            self._ws_task.cancel()
-            try:
-                await self._ws_task
-            except asyncio.CancelledError:
-                pass
+    async def _probe_ap(self, host: str) -> bool:
+        try:
+            data = await self._read_ap_json(host, "sysinfo")
+        except (aiohttp.ClientError, TimeoutError, ValueError):
+            return False
+        env = data.get("env")
+        if not isinstance(env, str) or not env:
+            return False
+        if host != self.host and (
+            not isinstance(data.get("buildversion"), str)
+            or type(data.get("ap_version")) is not int
+        ):
+            return False
+        if host == self.host:
+            self.ap_env = env
+            self.ap_model = self._format_ap_model(env)
+        return True
 
-        # Clean up other callbacks
-        while self._unsub_callbacks:
-            try:
-                unsub = self._unsub_callbacks.pop()
-                unsub()
-            except Exception as err:
-                _LOGGER.debug("Error cleaning up callback: %s", err)
+    def _stored_peers(self, manual: set[str]) -> set[str]:
+        """Keep retrying previously verified peers in a trusted discovery network."""
+        if not self._discovery_enabled():
+            return set()
+        sources = {self._main_hub_ip, *manual}
+        peers = [
+            host for host, data in self._discovered_hubs.items()
+            if host not in manual and host != self._main_hub_ip
+            and data.get("verified") is True
+            and any(same_discovery_network(source, host) for source in sources)
+        ][:MAX_DISCOVERED_APS]
+        return set(peers)
 
-        # Mark as offline
-        self.online = False
-        async_dispatcher_send(self.hass, f"{DOMAIN}_connection_status", False)
+    async def _verify_connection(self, host: str) -> bool:
+        """Revalidate secondary APs before opening each session."""
+        return host == self.host or await self._probe_ap(host)
 
-        if self._scheduled_storage_save:
-            self._scheduled_storage_save.cancel()
-            self._scheduled_storage_save = None
-
-        _LOGGER.debug("OpenEPaperLink hub shutdown complete")
-
-    def _schedule_storage_save(self, delay: float = SAVE_DELAY) -> None:
-        """Schedule a debounced storage write."""
-        if self._scheduled_storage_save:
-            self._scheduled_storage_save.cancel()
-
-        self._scheduled_storage_save = self.hass.loop.call_later(
-            delay,
-            self._flush_scheduled_storage_save,
+    async def _discover_peer(self, reporter: str, item: dict) -> None:
+        host = discovery_candidate(item)
+        if (
+            not self._discovery_enabled() or not host or host in self._connections.hosts
+            or host == self._main_hub_ip
+            or len(self._verified_peers) >= MAX_DISCOVERED_APS
+            or not same_discovery_network(
+                self._main_hub_ip if reporter == self.host else normalize_ip(reporter), host
+            )
+        ):
+            return
+        now = self.hass.loop.time()
+        self._probe_after = {ip: until for ip, until in self._probe_after.items() if until > now}
+        if host in self._probe_after or len(self._probe_after) >= MAX_DISCOVERED_APS:
+            return
+        self._probe_after[host] = now + 60
+        if not await self._probe_ap(host) or self._closing or not self._discovery_enabled():
+            return
+        if not same_discovery_network(self._main_hub_ip, host) and not any(
+            same_discovery_network(manual_host, host) for manual_host in self._manual_peers()
+        ):
+            return
+        self._verified_peers.add(host)
+        self._upsert_discovered_hub(
+            {"hub_id": host, "ip": host, "metadata": {
+                key: item[key] for key in ("alias", "channel", "version")
+            }},
+            "apitem",
         )
+        self._discovered_hubs[host]["verified"] = True
+        self._schedule_storage_save()
+        self._connections.start(host)
 
-    @callback
-    def _flush_scheduled_storage_save(self) -> None:
-        """Flush a scheduled storage write."""
-        self._scheduled_storage_save = None
-        self.hass.async_create_task(self._store.async_save(self._build_storage_payload()))
+    def _handle_connection(self, host: str, online: bool) -> None:
+        """Refresh entities after either AP connects or disconnects."""
+        if online and host in self._discovered_hubs:
+            self._discovered_hubs[host]["last_seen"] = datetime.now(timezone.utc).isoformat()
+            self._schedule_storage_save()
+        async_dispatcher_send(self.hass, f"{DOMAIN}_connection_status", online)
+        async_dispatcher_send(self.hass, SIGNAL_AP_UPDATE)
 
-    async def _websocket_handler(self) -> None:
-        """Handle WebSocket connection lifecycle and process messages.
+    async def _initialize_ap(self, host: str) -> None:
+        """Request discovery and refresh the reporting AP's tag inventory."""
+        if host == self.host and not self.ap_env:
+            await self._probe_ap(host)
+        try:
+            await self._read_ap_config(host)
+        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+            _LOGGER.debug("Could not read AP configuration: %s", err)
+        try:
+            await self.async_load_all_tags(host)
+        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+            _LOGGER.debug("Could not refresh AP tag inventory: %s", err)
 
-         This is a long-running task that manages all aspects of the WebSocket
-         connection to the OpenEPaperLink Access Point, including:
-
-         - Establishing and maintaining the connection
-         - Processing incoming real-time messages from the AP
-         - Detecting connection failures and implementing reconnection logic
-         - Broadcasting connection state changes to dependent entities
-
-         The handler implements error resilience through nested try/except blocks:
-
-         - Outer block: Handles connection establishment and reconnection
-         - Inner block: Processes individual messages within an active connection
-
-         When connection errors occur, the handler waits for RECONNECT_INTERVAL
-         seconds before attempting to reconnect, continuing until the hub
-         shutdown is signaled via the self._shutdown Event.
-
-         Note: This method should be run as a background task and not awaited
-         directly, as it runs indefinitely until shutdown is triggered.
-         """
-        while not self._shutdown.is_set():
-            try:
-                ws_url = f"ws://{self.host}/ws"
-                async with self._session.ws_connect(ws_url, heartbeat=30) as ws:
-                    self.online = True
-                    _LOGGER.debug("Connected to websocket at %s", ws_url)
-                    async_dispatcher_send(self.hass, f"{DOMAIN}_connection_status", True)
-
-                    # Run verification on each connection to catch deletions that happened while offline
-                    await self._verify_and_cleanup_tags()
-
-                    while not self._shutdown.is_set():
-                        try:
-                            msg = await ws.receive()
-
-                            if msg.type == aiohttp.WSMsgType.TEXT:
-                                await self._handle_message(msg.data)
-                            elif msg.type == aiohttp.WSMsgType.ERROR:
-                                _LOGGER.info("WebSocket error: %s", ws)
-                                break
-                            elif msg.type == aiohttp.WSMsgType.CLOSING:
-                                _LOGGER.debug("WebSocket closing")
-                                break
-                            elif msg.type == aiohttp.WSMsgType.CLOSED:
-                                _LOGGER.debug("WebSocket closed")
-                                break
-                        except asyncio.CancelledError:
-                            _LOGGER.debug("WebSocket task cancelled")
-                            raise
-                        except Exception as err:
-                            _LOGGER.error("Error handling message: %s", err)
-
-            except asyncio.CancelledError:
-                _LOGGER.debug("WebSocket connection cancelled")
-                raise
-            except aiohttp.ClientError as err:
-                self.online = False
-                _LOGGER.error("WebSocket connection error: %s", err)
-                async_dispatcher_send(self.hass, f"{DOMAIN}_connection_status", False)
-            except Exception as err:
-                self.online = False
-                _LOGGER.error("Unexpected WebSocket error: %s", err)
-                async_dispatcher_send(self.hass, f"{DOMAIN}_connection_status", False)
-
-            if not self._shutdown.is_set():
-                await asyncio.sleep(RECONNECT_INTERVAL)
-
-
-    def _schedule_reconnect(self) -> None:
-        """Schedule a WebSocket reconnection attempt.
-
-        Creates a task to reconnect after RECONNECT_INTERVAL seconds.
-        If a reconnection task is already scheduled, it's cancelled first
-        to avoid multiple concurrent reconnection attempts.
-        """
-        async def reconnect():
-            await asyncio.sleep(RECONNECT_INTERVAL)
-            if not self._shutdown.is_set():
-                self._ws_task = self.hass.async_create_task(
-                    self._websocket_handler(),
-                    f"{DOMAIN}_websocket",
-                )
-
-        if self._reconnect_task and not self._reconnect_task.done():
-            self._reconnect_task.cancel()
-
-        self._reconnect_task = self.hass.async_create_task(
-            reconnect(),
-            f"{DOMAIN}_reconnect",
-        )
-
-    async def _handle_message(self, message: str) -> None:
-        """Process an incoming WebSocket message from the AP.
-
-        Parses the message JSON and routes it to the appropriate handler
-        based on the message type:
-
-        - "sys" messages: AP system status updates
-        - "tags" messages: Individual tag status updates
-        - "logMsg" messages: Log information from the AP
-        - "errMsg" messages: Error notifications
-        - "apitem" messages: Configuration change notifications
-
-        Args:
-            message: Raw WebSocket message string from the AP
-
-        Raises:
-            No exceptions are raised as they are caught and logged internally.
-        """
+    async def _handle_message(self, host: str, message: str) -> bool:
+        """Process a WebSocket report with its AP provenance."""
         try:
             data = json.loads("{" + message.split("{", 1)[-1])
-
-            if "sys" in data:
-                _LOGGER.debug("System message: %s", data["sys"])
-                await self._handle_system_message(data["sys"])
-            elif "tags" in data:
-                _LOGGER.debug("Tag message: %s", data["tags"][0])
-                await self._handle_tag_message(data["tags"][0])
-            elif "logMsg" in data:
-                _LOGGER.debug("OEPL Log message: %s", data["logMsg"])
-                await self._handle_log_message(data["logMsg"])
-            elif "errMsg" in data and data["errMsg"] == "REBOOTING":
-                _LOGGER.debug("AP is rebooting")
-                self._ap_data["ap_state"] = "Offline"
-                async_dispatcher_send(self.hass, SIGNAL_AP_UPDATE)
-                self.online = False
-                async_dispatcher_send(self.hass, f"{DOMAIN}_connection_status", False)
-
-                # Close WebSocket connection immediately
-                if self._ws_task and not self._ws_task.done():
-                    self._ws_task.cancel()
-
-                # Schedule reconnection attempt after brief delay
-                async def delayed_reconnect():
-                    await asyncio.sleep(5)
-                    if not self._shutdown.is_set():
-                        self._ws_task = self.hass.async_create_task(
-                            self._websocket_handler(),
-                            f"{DOMAIN}_websocket"
-                        )
-
-                self.hass.async_create_task(delayed_reconnect(), f"{DOMAIN}_reconnect")
-                return
-            elif "apitem" in data:
-                # Check if this is actually a config change message
-                if data.get("apitem", {}).get("type") == "change":
-                    await self._handle_ap_config_message(data)
+            if isinstance(system := data.get("sys"), dict):
+                if host == self.host:
+                    await self._handle_system_message(system)
                 else:
-                    _LOGGER.debug("Ignoring non-change AP message")
-            else:
-                _LOGGER.debug("Unknown message type: %s", data)
+                    self._secondary_status[host] = {
+                        key: system[key] for key in (
+                            "recordcount", "rssi", "uptime", "apstate", "runstate"
+                        ) if key in system
+                    }
+                    async_dispatcher_send(self.hass, SIGNAL_AP_UPDATE)
+            if isinstance(tags := data.get("tags"), list):
+                for tag in tags:
+                    if isinstance(tag, dict) and (mac := normalize_mac(tag.get("mac"))):
+                        await self._process_tag_data(mac, tag, reporter=host)
+            if isinstance(item := data.get("apitem"), dict):
+                if item.get("type") == "change":
+                    if host == self.host:
+                        await self.async_update_ap_config()
+                else:
+                    await self._discover_peer(host, item)
+            if isinstance(log := data.get("logMsg"), str):
+                await self._handle_log_message(log, host)
+            return data.get("errMsg") == "REBOOTING"
+        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+            _LOGGER.debug("Ignoring invalid AP message: %s", err)
+            return False
 
-            if "tags" not in data:
-                self._discover_remote_hubs_from_payload(data, source="websocket")
-
-        except json.JSONDecodeError:
-            _LOGGER.error("Failed to decode message: %s", message)
-        except Exception as err:
-            _LOGGER.exception("Error handling message: %s", err)
-
-    @callback
     async def _handle_system_message(self, sys_data: dict) -> None:
         """Process a system message from the AP.
 
@@ -529,41 +472,9 @@ class Hub:
             "timeout_count": sys_data.get("timeoutcount", current_timeout),
         }
 
-        if "recordcount" in sys_data:
-            self._track_record_count_changes(sys_data.get("recordcount", 0))
-
         async_dispatcher_send(self.hass, SIGNAL_AP_UPDATE)
 
-    @callback
-    async def _handle_tag_message(self, tag_data: dict) -> None:
-        """Process a tag update message from the AP.
-
-        Updates the stored information for a specific tag based on the
-        data received from the AP. This includes:
-
-        - Tag status (battery, temperature, etc.)
-        - Scheduling information (next update, next check-in)
-        - Signal quality information (RSSI, LQI)
-
-        Args:
-            tag_data: Dictionary containing tag properties from the AP
-        """
-        tag_mac = tag_data.get("mac")
-        if not tag_mac:
-            return
-
-        # Process tag data
-        is_new_tag = await self._process_tag_data(tag_mac, tag_data)
-        # Save to storage if this was a new tag
-        if is_new_tag:
-            await self._store.async_save(self._build_storage_payload())
-        else:
-            # Schedule a save with a delay to avoid constant writes
-            # Will be implemented in the future
-            await self._store.async_save(self._build_storage_payload())
-
-
-    async def _handle_log_message(self, log_msg: str) -> None:
+    async def _handle_log_message(self, log_msg: str, reporter: str) -> None:
         """Process a log message from the AP.
 
         Parses log messages for specific events that require action:
@@ -578,22 +489,25 @@ class Hub:
             # Example: "0000000000123456 block request /current/0000000000123456_452783.pending block 0"
             parts = log_msg.split()
             if len(parts) > 0:
-                tag_mac = parts[0].upper()
-                if tag_mac in self._data:
+                tag_mac = self._tag_keys.get(parts[0].upper(), parts[0].upper())
+                if tag_mac in self._data and reporter == self._data[tag_mac].get("reporter"):
                     block_requests = self._data[tag_mac].get("block_requests", 0) + 1
                     self._data[tag_mac]["block_requests"] = block_requests
+                    self._schedule_storage_save()
                     # Notify of update
                     async_dispatcher_send(self.hass, f"{SIGNAL_TAG_UPDATE}_{tag_mac}")
         if "reports xfer complete" in log_msg:
             # Extract MAC address from block request message
             parts = log_msg.split()
             if len(parts) > 0:
-                tag_mac = parts[0].upper()
-                if tag_mac in self._data:
+                tag_mac = self._tag_keys.get(parts[0].upper(), parts[0].upper())
+                if tag_mac in self._data and reporter == self.image_hosts(tag_mac)[0]:
                     # Notify of update
                     async_dispatcher_send(self.hass, f"{SIGNAL_TAG_IMAGE_UPDATE}_{tag_mac}", True)
 
-    async def _process_tag_data(self, tag_mac: str, tag_data: dict, is_initial_load: bool = False) -> bool:
+    async def _process_tag_data(
+        self, tag_mac: str, tag_data: dict, is_initial_load: bool = False, *, reporter: str
+    ) -> bool:
         """Process tag data and update internal state.
 
         Handles updates for a single tag, including:
@@ -617,19 +531,69 @@ class Hub:
             No exceptions are raised as they are caught and logged internally.
         """
 
-        # Skip blacklisted tags
-        if tag_mac in self._blacklisted_tags:
-            _LOGGER.debug("Ignoring blacklisted tag: %s", tag_mac)
+        # A firmware deletion marker is not an authoritative, durable tombstone.
+        if tag_mac in self._blacklisted_tags or tag_data.get("contentMode") == 255:
             return False
 
-        # Check if this is a new tag
+        tag_mac = self._tag_keys.get(tag_mac.upper(), tag_mac)
         is_new_tag = tag_mac not in self._known_tags
-
-        # Get existing data to calculate runtime and update counters
         existing_data = self._data.get(tag_mac, {})
-
-        tag_name = tag_data.get("alias") or tag_mac
         last_seen = tag_data.get("lastseen")
+        max_seen = datetime.now(timezone.utc).timestamp() + 300
+        if type(last_seen) is not int or not 0 <= last_seen <= max_seen:
+            return False
+        previous_seen = existing_data.get("last_seen") or 0
+        if not isinstance(previous_seen, (int, float)) or not 0 <= previous_seen <= max_seen:
+            previous_seen = 0
+        is_external = tag_data.get("isexternal")
+        connected_ap, binding_source = resolve_connected_ap(tag_data.get("apip"), reporter, is_external)
+        previous_radio = existing_data.get("connected_ap")
+        previous_reporter = existing_data.get("reporter")
+        content_host = self._content_host(tag_mac)
+        # UDP replicas can stamp the same check-in a few seconds later.
+        replaces_replica = (
+            binding_source == "local" and existing_data.get("binding_source") == "tag.apip"
+            and previous_radio and self._connection_host(previous_radio) == reporter
+            and 0 <= previous_seen - last_seen <= REPLICA_CLOCK_SKEW
+        )
+        if last_seen < previous_seen and not replaces_replica:
+            if reporter in (content_host, self.host) and previous_reporter != reporter:
+                self._update_content_metadata(
+                    tag_mac, tag_data, existing_data, is_initial_load, reporter=reporter
+                )
+            return False
+        replicated = binding_source == "tag.apip"
+        secondary_copy = replicated and (
+            self.is_ap_online(connected_ap)
+            or (previous_radio != connected_ap and self.is_ap_online(previous_radio)
+                and last_seen <= previous_seen + REPLICA_CLOCK_SKEW)
+        )
+        adopts_radio = binding_source == "local" and (
+            previous_reporter is None
+            or (connected_ap != previous_radio and not self.is_ap_online(previous_radio))
+        )
+        metadata_only = bool(existing_data) and not replaces_replica and (
+            secondary_copy or (last_seen == previous_seen and not adopts_radio)
+        )
+        if metadata_only:
+            if reporter in (content_host, previous_reporter, self.host):
+                self._update_content_metadata(
+                    tag_mac, tag_data, existing_data, is_initial_load,
+                    include_checkin=not replicated, reporter=reporter,
+                )
+            return False
+
+        # A replica can initialize state but does not repeat an online radio's physical events.
+        new_checkin = (
+            not is_initial_load and last_seen > previous_seen
+            and not secondary_copy and connected_ap is not None
+        )
+        if "alias" in tag_data and (
+            reporter == content_host or existing_data.get("content_reporter") != content_host
+        ):
+            tag_name = tag_data["alias"] or tag_mac
+        else:
+            tag_name = existing_data.get("tag_name") or tag_mac
         next_update = tag_data.get("nextupdate")
         next_checkin = tag_data.get("nextcheckin")
         lqi = tag_data.get("LQI")
@@ -637,7 +601,7 @@ class Hub:
         temperature = tag_data.get("temperature")
         battery_mv = tag_data.get("batteryMv")
         pending = tag_data.get("pending")
-        hw_type = tag_data.get("hwType")
+        hw_type = tag_data.get("hwType", existing_data.get("hw_type")) or 0
         hw_string = get_hw_string(hw_type)
         width, height = self._tag_manager.get_hw_dimensions(hw_type)
         content_mode = tag_data.get("contentMode")
@@ -645,64 +609,37 @@ class Hub:
         capabilities = tag_data.get("capabilities")
         hashv = tag_data.get("hash")
         modecfgjson = tag_data.get("modecfgjson")
-        is_external = tag_data.get("isexternal")
-        connected_ap, binding_source = resolve_connected_ap(
-            tag_data.get("apip"),
-            self._main_hub_ip,
-            self.host,
-        )
-        previous_connected_ap = existing_data.get("connected_ap")
         previous_binding_source = existing_data.get("binding_source")
         binding_last_updated = existing_data.get("binding_last_updated")
-        if connected_ap != previous_connected_ap or binding_source != previous_binding_source:
+        if connected_ap is None:
+            connected_ap, binding_source = previous_radio, previous_binding_source
+        elif (connected_ap, binding_source) != (previous_radio, previous_binding_source):
             binding_last_updated = datetime.now(timezone.utc).isoformat()
-            if connected_ap and connected_ap != self._main_hub_ip:
-                self._upsert_discovered_hub(
-                    {
-                        "hub_id": connected_ap,
-                        "ip": connected_ap,
-                        "metadata": {"source": "tag_apip", "mac": tag_mac, "isexternal": is_external},
-                        "evidence_path": f"tag[{tag_mac}].apip",
-                    },
-                    source=binding_source or "tag.apip",
-                )
         rotate = tag_data.get("rotate")
         lut = tag_data.get("lut")
         channel = tag_data.get("ch")
         version = tag_data.get("ver")
         update_count = tag_data.get("updatecount")
 
-        # Check if name has changed
-        old_name = existing_data.get("tag_name")
-        if old_name and old_name != tag_name:
-            _LOGGER.debug("Tag name changed from '%s' to '%s'", old_name, tag_name)
-            # Update device name in device registry
-            device_registry = dr.async_get(self.hass)
-            device = device_registry.async_get_device(
-                identifiers={(DOMAIN, tag_mac)}
-            )
-            if device:
-                device_registry.async_update_device(
-                    device.id,
-                    name=tag_name
-                )
+        if existing_data and existing_data.get("tag_name") != tag_name:
+            self._update_device_name(tag_mac, tag_name)
 
         # Calculate runtime delta (only if this is not the initial load)
         runtime_delta = 0
         runtime_total =  existing_data.get("runtime", 0)
-        if not is_initial_load and existing_data:
+        if new_checkin and existing_data:
             runtime_delta = self._calculate_runtime_delta(tag_data, existing_data)
             runtime_total += runtime_delta
 
         # Update boot count if this is a power-on event
         boot_count = existing_data.get("boot_count", 1)
-        if not is_initial_load and wakeup_reason in [1, 252, 254]:  # BOOT, FIRSTBOOT, WDT_RESET
+        if new_checkin and tag_data.get("wakeupReason") in (1, 252, 254):  # BOOT, FIRSTBOOT, WDT_RESET
             boot_count += 1
             runtime_total = 0  # Reset runtime on boot
 
         # Update check-in counter
         checkin_count = existing_data.get("checkin_count", 0)
-        if not is_initial_load:
+        if new_checkin:
             checkin_count += 1
 
         # Get existing block request count
@@ -731,6 +668,7 @@ class Hub:
             "modecfgjson": modecfgjson,
             "is_external": is_external,
             "connected_ap": connected_ap,
+            "reporter": reporter,
             "binding_source": binding_source,
             "binding_last_updated": binding_last_updated,
             "rotate": rotate,
@@ -743,20 +681,40 @@ class Hub:
             "checkin_count": checkin_count,
             "block_requests": block_requests,
         }
+        updated = self._data[tag_mac]
+        for key in ("content_reporter", "content_report_at", "primary_content_remote", "primary_report_at"):
+            if key in existing_data:
+                updated[key] = existing_data[key]
+        if reporter == self.host:
+            self._update_primary_content_flag(updated, tag_data)
+        if reporter == content_host:
+            updated["content_reporter"] = reporter
+            updated["content_report_at"] = last_seen
+        elif existing_data.get("content_reporter") == content_host:
+            for key in ("pending", "hash", "next_update", "modecfgjson", "content_mode", "update_count"):
+                updated[key] = existing_data.get(key)
 
         # Handle new tag discovery
         if is_new_tag:
+            self._tag_keys[tag_mac.upper()] = tag_mac
             self._known_tags.add(tag_mac)
             _LOGGER.debug("Discovered new tag: %s", tag_mac)
             # Fire discovery event before saving
             async_dispatcher_send(self.hass, f"{DOMAIN}_tag_discovered", tag_mac)
+
+        self._schedule_storage_save()
+        if (
+            not is_initial_load and existing_data and updated["hash"]
+            and updated["hash"] != existing_data.get("hash")
+        ):
+            async_dispatcher_send(self.hass, f"{SIGNAL_TAG_IMAGE_UPDATE}_{tag_mac}", True)
 
         # Fire state update event
         async_dispatcher_send(self.hass, f"{SIGNAL_TAG_UPDATE}_{tag_mac}")
 
         # Handle wakeup event if needed and not initial load
         wakeup_reason = tag_data.get("wakeupReason")
-        if not is_initial_load and wakeup_reason is not None:
+        if new_checkin and wakeup_reason is not None:
             reason_string = self._get_wakeup_reason_string(wakeup_reason)
 
             should_fire = True
@@ -794,6 +752,61 @@ class Hub:
 
         return is_new_tag
 
+    def _update_device_name(self, tag_mac: str, tag_name: str) -> None:
+        registry = dr.async_get(self.hass)
+        if device := registry.async_get_device(identifiers={(DOMAIN, tag_mac)}):
+            registry.async_update_device(device.id, name=tag_name)
+
+    def _update_content_metadata(
+        self, tag_mac: str, report: dict, existing: dict, is_initial_load: bool,
+        *, reporter: str, include_checkin: bool = False,
+    ) -> None:
+        """Accept content updates independently of radio observation ordering."""
+        if reporter == self.host:
+            self._update_primary_content_flag(existing, report)
+        if (
+            existing.get("content_reporter") == reporter
+            and report["lastseen"] < existing.get("content_report_at", 0)
+        ):
+            return
+        content_host = self._content_host(tag_mac)
+        updates = {}
+        if reporter == content_host or existing.get("content_reporter") != content_host:
+            fields = {
+                "pending": "pending", "hash": "hash", "nextupdate": "next_update",
+                "modecfgjson": "modecfgjson", "updatecount": "update_count",
+            }
+            updates.update({field: report[key] for key, field in fields.items() if key in report})
+            if "alias" in report:
+                updates["tag_name"] = report["alias"] or tag_mac
+            if "contentMode" in report:
+                updates["content_mode"] = self._get_content_mode_string(report["contentMode"])
+        if include_checkin and "nextcheckin" in report:
+            updates["next_checkin"] = report["nextcheckin"]
+        if reporter == content_host:
+            updates.update(content_reporter=reporter, content_report_at=report["lastseen"])
+        if not any(existing.get(field) != value for field, value in updates.items()):
+            return
+        old_hash = existing.get("hash")
+        if "tag_name" in updates and updates["tag_name"] != existing.get("tag_name"):
+            self._update_device_name(tag_mac, updates["tag_name"])
+        existing.update(updates)
+        self._schedule_storage_save()
+        async_dispatcher_send(self.hass, f"{SIGNAL_TAG_UPDATE}_{tag_mac}")
+        if not is_initial_load and updates.get("hash") and updates["hash"] != old_hash:
+            async_dispatcher_send(self.hass, f"{SIGNAL_TAG_IMAGE_UPDATE}_{tag_mac}", True)
+
+    def _update_primary_content_flag(self, data: dict, report: dict) -> None:
+        mode = report.get("contentMode")
+        previous_time = data.get("primary_report_at", 0)
+        if (
+            type(mode) is int and report["lastseen"] >= previous_time
+            and (report["lastseen"], mode == 12) != (previous_time, data.get("primary_content_remote"))
+        ):
+            data["primary_content_remote"] = mode == 12
+            data["primary_report_at"] = report["lastseen"]
+            self._schedule_storage_save()
+
     async def _run_ap_command(self, func: Callable[[], Any | Awaitable[Any]]) -> Any:
         async with self._ap_cmd_sem:
             if self._ap_cmd_cooldown:
@@ -803,6 +816,10 @@ class Hub:
                 return await func()
             return await self.hass.async_add_executor_job(func)
 
+    def _content_host(self, tag_mac: str | None) -> str:
+        host = self.entry.options.get(CONF_CONTENT_APS, {}).get(tag_mac.upper() if tag_mac else None)
+        return host if host in self._manual_peers() else self.host
+
     def resolve_tag_target_host(
         self,
         *,
@@ -810,36 +827,37 @@ class Hub:
         entity_id: str | None = None,
         tag_mac: str | None = None,
     ) -> tuple[str, bool]:
-        """Resolve target AP host for a tag-scoped action.
+        """Resolve the AP for a specific firmware operation."""
+        if tag_mac is None and entity_id:
+            tag_mac = entity_id.rpartition(".")[2].upper()
+        if not uses_radio(action):
+            target = self._content_host(tag_mac)
+            data = self.get_tag_data(tag_mac) if tag_mac else {}
+            legacy_remote = (
+                data.get("reporter") in (None, self.host)
+                and data.get("content_mode") == self._get_content_mode_string(12)
+            )
+            if target == self.host and data.get("primary_content_remote", legacy_remote):
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="content_ap_required",
+                    translation_placeholders={"tag": tag_mac},
+                )
+            return target, False
 
-        Uses the tag's stored connected_ap value when valid, otherwise falls back
-        to the main hub host.
-        """
-        resolved_tag_mac = tag_mac or (
-            entity_id.split(".")[1].upper() if entity_id and "." in entity_id else None
-        )
-        tag_data = self._data.get(resolved_tag_mac, {}) if resolved_tag_mac else {}
-        raw_connected_ap = tag_data.get("connected_ap")
-        connected_ap = normalize_ip(raw_connected_ap)
+        radio = self.get_tag_data(tag_mac).get("connected_ap") if tag_mac else None
+        if radio and self.is_ap_online(radio):
+            return self._connection_host(radio), False
+        return self.host, True
 
-        fallback_used = connected_ap is None
-        target_host = connected_ap or self.host
-        fallback_reason = None
-        raw_value_for_log = None
-        if fallback_used:
-            fallback_reason = "missing" if raw_connected_ap in (None, "") else "invalid"
-            raw_value_for_log = raw_connected_ap
-        _LOGGER.debug(
-            "Tag HTTP routing action=%s entity_id=%s tag_mac=%s target_host=%s fallback=%s fallback_reason=%s raw_connected_ap=%s",
-            action,
-            entity_id,
-            resolved_tag_mac,
-            target_host,
-            fallback_used,
-            fallback_reason,
-            raw_value_for_log,
-        )
-        return target_host, fallback_used
+    def image_hosts(self, tag_mac: str) -> tuple[str, ...]:
+        """Prefer the content AP and fall back to verified read-only sources."""
+        data = self.get_tag_data(tag_mac)
+        hosts = [self._content_host(tag_mac)]
+        for host in (data.get("reporter"), data.get("connected_ap")):
+            if host and self.is_ap_online(host):
+                hosts.append(self._connection_host(host))
+        return tuple(dict.fromkeys((*hosts, self.host)))
 
     async def _ap_request(
         self,
@@ -854,7 +872,7 @@ class Hub:
         request_host = target_host or self.host
         url = f"http://{request_host}/{path.lstrip('/')}"
         def call():
-            return requests.request(method, url, data=data, timeout=timeout)
+            return requests.request(method, url, data=data, timeout=timeout, allow_redirects=False)
         try:
             resp = await self._run_ap_command(call)
         except requests.exceptions.Timeout:
@@ -873,7 +891,7 @@ class Hub:
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
                 translation_key="ap_failed_action_http",
-                translation_placeholders={"action": action, "status": resp.status_code, "text": resp.text},
+                translation_placeholders={"action": action, "status_code": resp.status_code, "response_text": resp.text},
             )
         return resp
 
@@ -932,227 +950,22 @@ class Hub:
         _LOGGER.info("Set AP config %s = %s", key, value)
         return True
 
-    async def _fetch_all_tags_from_ap(self) -> dict:
-        """Fetch complete list of tags from the AP database.
-
-        Retrieves all tag data using the AP's HTTP API, handling pagination
-        to ensure all tags are retrieved even when there are many tags.
-
-        The API returns tags in batches, with a continuation token
-        to fetch the next batch until all tags have been retrieved.
-
-        Returns:
-            dict: Dictionary mapping tag MAC addresses to their complete data
-
-        Raises:
-            Exception: If HTTP requests fail or return unexpected data
-        """
-        result = {}
+    async def async_load_all_tags(self, host: str) -> None:
+        """Add or refresh records from a snapshot. An omission never prunes data."""
         position = 0
-        retries_left = 10
-
+        seen_positions = {position}
         while True:
-            url = f"http://{self.host}/get_db"
-            if position > 0:
-                url += f"?pos={position}"
-
-            try:
-                response = await self.hass.async_add_executor_job(
-                    lambda: requests.get(url, timeout=10)
-                )
-
-                if response.status_code != 200:
-                    _LOGGER.error("Failed to fetch all tags from AP: %s", response.text)
-                    retries_left -= 1
-                    if retries_left <= 0:
-                        raise Exception(f"Failed to fetch tags after multiple retries: {response.text}")
-                    await asyncio.sleep(1)
-                    continue
-
-                data = response.json()
-                self._discover_remote_hubs_from_payload(data, source="http_get_db")
-
-                # Add tags to set
-                for tag in data.get("tags", []):
-                    if "mac" in tag:
-                        result[tag["mac"]] = tag
-
-                # Check for pagination
-                if "continu" in data and data["continu"] > 0:
-                    position = data["continu"]
-                else:
-                    break
-
-            except Exception as err:
-                _LOGGER.error("Failed to fetch all tags from AP: %s", str(err))
-                retries_left -= 1
-                if retries_left <= 0:
-                    raise
-                await asyncio.sleep(1)
-                continue
-
-        return result
-
-    async def async_load_all_tags(self) -> None:
-        """Load all tags from the AP at startup.
-
-        Fetches the complete list of tags from the AP's database and:
-
-        - Processes each tag to update internal state
-        - Counts new and updated tags for logging purposes
-        - Saves updated data to persistent storage
-
-        This provides a complete initial state for the integration
-        without waiting for individual tag check-ins.
-
-        Raises:
-            Exception: If fetching or processing tags fails
-        """
-        try:
-            _LOGGER.info("Loading existing tags from AP...")
-
-            # Track the number of processed tags
-            new_tags_count = 0
-            updated_tags_count = 0
-
-            # Get all tag data from AP
-            all_tags = await self._fetch_all_tags_from_ap()
-
-            # Process each tag using the common helper function
-            for tag_mac, tag_data in all_tags.items():
-                # Process tag with the initial load flag set
-                is_new = await self._process_tag_data(tag_mac, tag_data, is_initial_load=True)
-
-                # Update counters
-                if is_new:
-                    new_tags_count += 1
-                else:
-                    updated_tags_count += 1
-
-            # Save to persistent storage
-            await self._store.async_save(self._build_storage_payload())
-
-            if new_tags_count > 0 or updated_tags_count > 0:
-                _LOGGER.info("Loaded %d new tags and updated %d existing tags from AP",
-                             new_tags_count, updated_tags_count)
-
-        except Exception as err:
-            _LOGGER.error("Failed to load tags from AP: %s", err)
-            raise
-
-    def _track_record_count_changes(self, new_record_count: int) -> None:
-        """Track changes in record count to detect tag deletions.
-
-        When the AP's record count decreases, it indicates that one or more
-        tags have been deleted from the AP. This method detects such changes
-        and schedules a verification task to identify and remove deleted tags.
-
-        Args:
-            new_record_count: New record count reported by the AP
-        """
-        if self._last_record_count is not None and new_record_count < self._last_record_count:
-            # Record count has decreased, indicating a possible tag deletion
-            _LOGGER.info(f"AP record count decreased from {self._last_record_count} to {new_record_count}. Checking for deleted tags...")
-
-            # Cancel existing cleanup task if any
-            if self._cleanup_task and not self._cleanup_task.done():
-                self._cleanup_task.cancel()
-
-            # Schedule cleanup task to verify and clean up any deleted tags
-            self._cleanup_task = self.hass.async_create_task(
-                self._verify_and_cleanup_tags(),
-                f"{DOMAIN}_tag_verification"
-            )
-
-        # Update the last known record count
-        self._last_record_count = new_record_count
-
-    async def _verify_and_cleanup_tags(self) -> None:
-        """Verify which tags exist on the AP and clean up deleted ones.
-
-        Checks if any locally known tags have been deleted from the AP
-        and removes them from:
-
-        - Internal data structures
-        - Home Assistant device and entity registries
-        - Persistent storage
-
-        This ensures Home Assistant's state matches the actual AP state
-        when tags are removed from the AP directly.
-
-        Raises:
-            No exceptions are raised as they are caught and logged internally.
-        """
-        try:
-            # Get current tags from AP
-            ap_tags = await self._fetch_all_tags_from_ap()
-
-            # Map tags to mac addresses
-            ap_macs = set(ap_tags.keys())
-
-            ap_macs_upper = {mac.upper() for mac in ap_macs}
-            known_macs_upper = {mac.upper() for mac in self._known_tags}
-
-            # Find locally known tags that are missing from the AP
-            deleted_tags = known_macs_upper - ap_macs_upper
-
-            if deleted_tags:
-                _LOGGER.info(f"Detected {len(deleted_tags)} deleted tags from AP: {deleted_tags}")
-
-                # Map back to original case if needed
-                for tag_mac in list(self._known_tags):  # Create a copy for safe iteration
-                    if tag_mac.upper() in deleted_tags:
-                        await self._remove_tag(tag_mac)
-
-        except Exception as err:
-            _LOGGER.error(f"Error while verifying AP tags: {err}")
-
-    async def _remove_tag(self, tag_mac: str) -> None:
-        """Remove a tag from HA.
-
-        Args:
-            tag_mac: The MAC address of the tag to remove.
-        """
-        _LOGGER.info(f"Removing tag {tag_mac} as it no longer exists on the AP")
-
-        # Remove from known tags and data
-        if tag_mac in self._known_tags:
-            self._known_tags.remove(tag_mac)
-            self._data.pop(tag_mac, None)
-
-            # Notify that this tag has been removed
-            async_dispatcher_send(self.hass, f"{SIGNAL_TAG_UPDATE}_{tag_mac}")
-
-            # Remove related devices and entities
-            device_registry = dr.async_get(self.hass)
-            entity_registry = er.async_get(self.hass)
-
-            # Find and remove entities for this tag
-            entities_to_remove = []
-            devices_to_remove = set()
-
-            for entity in entity_registry.entities.values():
-                if entity.config_entry_id == self.entry.entry_id:
-                    device = device_registry.async_get(entity.device_id) if entity.device_id else None
-                    if device:
-                        for identifier in device.identifiers:
-                            if identifier[0] == DOMAIN and identifier[1] == tag_mac:
-                                entities_to_remove.append(entity.entity_id)
-                                devices_to_remove.add(device.id)
-                                break
-
-            # Remove entities
-            for entity_id in entities_to_remove:
-                entity_registry.async_remove(entity_id)
-                _LOGGER.debug(f"Removed entity {entity_id} for deleted tag {tag_mac}")
-
-            # Remove devices
-            for device_id in devices_to_remove:
-                device_registry.async_remove_device(device_id)
-                _LOGGER.debug(f"Removed device {device_id} for deleted tag {tag_mac}")
-
-            # Update storage
-            await self._store.async_save(self._build_storage_payload())
+            data = await self._read_ap_json(host, "get_db", params={"pos": position})
+            tags = data.get("tags", [])
+            if not isinstance(tags, list):
+                raise ValueError("Invalid tag inventory")
+            for tag in tags:
+                if isinstance(tag, dict) and (mac := normalize_mac(tag.get("mac"))):
+                    await self._process_tag_data(mac, tag, is_initial_load=True, reporter=host)
+            position = data.get("continu", 0)
+            if type(position) is not int or position <= 0 or position in seen_positions:
+                break
+            seen_positions.add(position)
 
     async def async_reload_blacklist(self) -> None:
         """Reload the tag blacklist from config entry options.
@@ -1191,57 +1004,15 @@ class Hub:
                     async_dispatcher_send(self.hass, f"{SIGNAL_TAG_UPDATE}_{tag_mac}")
 
             # Save updated data to storage
-            await self._store.async_save({
-                "tags": self._data,
-                "discovered_hubs": self._discovered_hubs,
-            })
+            self._save_scheduled = False
+            await self._store.async_save(self._build_storage_payload())
 
-    async def _handle_ap_config_message(self, message: dict[str, Any]) -> None:
-        """Handle AP configuration updates.
-
-        Fetches the current AP configuration via HTTP and updates the
-        internal configuration state. This triggers when the AP sends
-        a configuration change notification.
-
-        The method uses a hash comparison to only trigger entity updates
-        when the configuration actually changes.
-
-        Args:
-            message: The configuration message from the AP
-        """
-        del message
-        try:
-            if self._shutdown.is_set():
-                return
-
-            async with aiohttp.ClientSession() as session:
-                async with async_timeout.timeout(10):
-                    async with session.get(f"http://{self.host}/get_ap_config") as response:
-                        if response.status != 200:
-                            _LOGGER.error("Failed to fetch AP config: HTTP %s", response.status)
-                            return
-
-                        new_config = await response.json()
-
-                        # Compare with existing config
-                        if not hasattr(self, '_last_config_hash'):
-                            self._last_config_hash = None
-
-                        # Create hash of new config for comparison
-                        new_hash = hash(frozenset(new_config.items()))
-
-                        if new_hash != self._last_config_hash:
-                            self.ap_config = new_config
-                            self._last_config_hash = new_hash
-                            _LOGGER.debug("AP config updated: %s", self.ap_config)
-                            async_dispatcher_send(self.hass, f"{DOMAIN}_ap_config_update")
-                        else:
-                            _LOGGER.debug("AP config unchanged, skipping update")
-
-        except asyncio.TimeoutError:
-            _LOGGER.error("Timeout fetching AP config")
-        except Exception as err:
-            _LOGGER.error("Failed to fetch AP config: %s", err)
+    async def _read_ap_config(self, host: str) -> None:
+        """Request firmware discovery and update primary configuration entities."""
+        config = await self._read_ap_json(host, "get_ap_config")
+        if host == self.host and config != self.ap_config:
+            self.ap_config = config
+            async_dispatcher_send(self.hass, f"{DOMAIN}_ap_config_update")
 
     @staticmethod
     def _get_wakeup_reason_string(reason: int) -> str:
@@ -1426,7 +1197,7 @@ class Hub:
         Returns:
             dict: Complete tag data dictionary or empty dict if tag not found
         """
-        return self._data.get(tag_mac, {})
+        return self._data.get(self._tag_keys.get(tag_mac.upper(), tag_mac), {})
 
     def get_blacklisted_tags(self) -> list[str]:
         """Return the list of blacklisted tag MAC addresses.
@@ -1440,12 +1211,16 @@ class Hub:
         return self._blacklisted_tags
 
     def get_discovered_hubs(self) -> dict[str, dict[str, Any]]:
-        """Return a copy of discovered remote hubs."""
-        return {hub_id: hub.copy() for hub_id, hub in self._discovered_hubs.items()}
+        """Return discovery records with live status kept outside the store."""
+        return {host: self.get_discovered_hub(host) for host in self._discovered_hubs}
 
     def get_discovered_hub(self, hub_id: str) -> dict[str, Any]:
-        """Return one discovered remote hub."""
-        return self._discovered_hubs.get(hub_id, {}).copy()
+        """Return the secondary AP's metadata and current connection status."""
+        return {
+            **self._discovered_hubs.get(hub_id, {}),
+            "online": self.is_ap_online(hub_id),
+            "status": self._secondary_status.get(hub_id, {}).copy(),
+        }
 
     @property
     def ap_status(self) -> dict:
@@ -1473,7 +1248,10 @@ class Hub:
         Raises:
             HomeAssistantError: If the AP is offline or returns an error.
         """
-        await self._handle_ap_config_message({"apitem": {"type": "change"}})
+        try:
+            await self._read_ap_config(self.host)
+        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+            _LOGGER.debug("Could not refresh AP configuration: %s", err)
 
     @staticmethod
     def _calculate_runtime_delta(new_data: dict, existing_data: dict) -> int:
@@ -1493,7 +1271,7 @@ class Hub:
             int: Runtime in seconds to add to the tag's total runtime,
                  or 0 if the interval is invalid or a power cycle occurred
         """
-        last_seen_old = existing_data.get("last_seen", 0)
+        last_seen_old = existing_data.get("last_seen") or 0
         last_seen_new = new_data.get("lastseen", 0)
 
         if last_seen_old == 0:
@@ -1505,34 +1283,10 @@ class Hub:
         wake_reason = new_data.get("wakeupReason")
         is_power_cycle = wake_reason in [1, 252, 254]  # BOOT, FIRSTBOOT, WDT_RESET
 
-        if is_power_cycle or time_diff > max_valid_interval:
+        if is_power_cycle or not 0 < time_diff <= max_valid_interval:
             return 0
 
         return time_diff
-
-    async def async_update_ap_info(self) -> None:
-        """Force update of AP configuration.
-
-        Fetches the current configuration from the AP via HTTP
-        and updates the internal state. This will trigger updates
-        for any entities that display configuration values.
-
-        This can be called manually to refresh configuration or
-        is triggered automatically when the AP sends a configuration
-        change notification.
-
-        Raises:
-            aiohttp.ClientError: If connection fails or HTTP error occurs
-            asyncio.TimeoutError: If request times out
-        """
-        async with async_timeout.timeout(10):
-            async with self._session.get(f"http://{self.host}/sysinfo") as response:
-                response.raise_for_status()  # Raises ClientResponseError on non-2xx
-
-                data = await response.json()
-                self._discover_remote_hubs_from_payload(data, source="http_sysinfo")
-                self.ap_env = data.get("env")
-                self.ap_model = self._format_ap_model(self.ap_env)
 
     def _build_storage_payload(self) -> dict[str, Any]:
         """Build persisted storage payload."""
@@ -1540,17 +1294,6 @@ class Hub:
             "tags": self._data,
             "discovered_hubs": self._discovered_hubs,
         }
-
-    def _discover_remote_hubs_from_payload(self, payload: Any, source: str) -> None:
-        """Discover remote hubs from websocket/http payloads."""
-        if payload is None:
-            return
-        for evidence in self._extract_remote_hub_evidence(payload):
-            self._upsert_discovered_hub(evidence, source=source)
-
-    def _extract_remote_hub_evidence(self, payload: Any) -> list[dict[str, Any]]:
-        """Extract possible remote AP hub evidence from a nested payload."""
-        return extract_remote_hub_evidence(payload=payload, main_hub_ip=self._main_hub_ip)
 
     def _upsert_discovered_hub(self, evidence: dict[str, Any], source: str) -> None:
         """Create/update discovered remote hub records."""
@@ -1650,7 +1393,7 @@ class Hub:
             return False
 
         tag_data = self.get_tag_data(tag_mac)
-        last_seen = tag_data.get("last_seen", 0)
+        last_seen = tag_data.get("last_seen") or 0
 
         if last_seen == 0:
             return False

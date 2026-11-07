@@ -577,6 +577,24 @@ class OpenEPaperLinkRemoteAPSensor(OpenEPaperLinkDiscoveredAPEntity, SensorEntit
         }
 
 
+class OpenEPaperLinkRemoteAPConnectivity(OpenEPaperLinkDiscoveredAPEntity, SensorEntity):
+    """Report whether this secondary AP has a live connection."""
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = True
+    _attr_options = ["online", "offline"]
+    _attr_translation_key = "remote_ap_connectivity"
+
+    def __init__(self, hub: Hub, hub_id: str) -> None:
+        super().__init__(hub, hub_id)
+        self._attr_unique_id = f"{hub.entry.entry_id}_remote_ap_{hub_id}_connectivity"
+
+    @property
+    def native_value(self) -> str:
+        return "online" if self._hub.is_ap_online(self._hub_id) else "offline"
+
+
 
 class OpenEPaperLinkBLESensor(OpenEPaperLinkBLEEntity, SensorEntity):
     """BLE sensor entity for OpenEPaperLink tags."""
@@ -705,7 +723,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenEPaperLinkConfigEntr
         if hub_id in known_remote_hubs:
             return
         known_remote_hubs.add(hub_id)
-        async_add_entities([OpenEPaperLinkRemoteAPSensor(hub, hub_id)])
+        async_add_entities([
+            OpenEPaperLinkRemoteAPSensor(hub, hub_id),
+            OpenEPaperLinkRemoteAPConnectivity(hub, hub_id),
+        ])
 
     for hub_id in hub.get_discovered_hubs().keys():
         async_add_remote_hub_sensor(hub_id)

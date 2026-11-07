@@ -6,7 +6,6 @@ from datetime import datetime
 from io import BytesIO
 from typing import Final
 
-import async_timeout
 import requests
 from requests_toolbelt import MultipartEncoder
 from PIL import Image
@@ -246,7 +245,7 @@ async def upload_to_hub(hub, entity_id: str, img: bytes, dither: int, ttl: int,
     multipart/form-data POST request. Configures display parameters
     such as dithering, TTL, and optional preloading.
 
-    Will retry upload on timeout, with increasing backoff times
+    Retries connection timeouts to the same AP, before the request is sent.
 
     Args:
         hub: Hub instance with connection details
@@ -311,14 +310,15 @@ async def upload_to_hub(hub, entity_id: str, img: bytes, dither: int, ttl: int,
 
             mp_encoder = MultipartEncoder(fields=fields)
 
-            async with async_timeout.timeout(30):  # 30 second timeout for upload
-                response = await hub.hass.async_add_executor_job(
-                    lambda: requests.post(
-                        url,
-                        headers={'Content-Type': mp_encoder.content_type},
-                        data=mp_encoder
-                    )
+            response = await hub.hass.async_add_executor_job(
+                lambda: requests.post(
+                    url,
+                    headers={'Content-Type': mp_encoder.content_type},
+                    data=mp_encoder,
+                    timeout=(5, 30),
+                    allow_redirects=False,
                 )
+            )
 
             if response.status_code != 200:
                 raise HomeAssistantError(
@@ -328,8 +328,8 @@ async def upload_to_hub(hub, entity_id: str, img: bytes, dither: int, ttl: int,
                 )
             break
 
-        except asyncio.TimeoutError:
-            if attempt < MAX_RETRIES:
+        except requests.exceptions.Timeout as err:
+            if isinstance(err, requests.exceptions.ConnectTimeout) and attempt < MAX_RETRIES:
                 _LOGGER.warning(
                     "Timeout uploading %s via AP %s (attempt %d/%d), retrying in %ds…",
                     entity_id,
@@ -344,8 +344,8 @@ async def upload_to_hub(hub, entity_id: str, img: bytes, dither: int, ttl: int,
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
                 translation_key="image_upload_timeout",
-                translation_placeholders={"entity_id": entity_id, "attempts": MAX_RETRIES}
-            )
+                translation_placeholders={"entity_id": entity_id, "attempts": attempt}
+            ) from err
 
         except requests.exceptions.RequestException as err:
             raise HomeAssistantError(
@@ -353,6 +353,9 @@ async def upload_to_hub(hub, entity_id: str, img: bytes, dither: int, ttl: int,
                 translation_key="image_upload_network",
                 translation_placeholders={"entity_id": entity_id, "error": str(err)}
             ) from err
+
+        except HomeAssistantError:
+            raise
 
         except Exception as err:
             raise HomeAssistantError(
