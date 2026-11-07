@@ -9,6 +9,7 @@ from homeassistant.const import Platform, EVENT_HOMEASSISTANT_STARTED, CONF_HOST
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 from homeassistant.helpers import entity_registry as er, device_registry as dr, storage
+from homeassistant.helpers import config_validation as cv
 from homeassistant.const import __version__ as HA_VERSION
 from homeassistant.helpers.typing import ConfigType
 from .ble import BLEDeviceMetadata
@@ -16,6 +17,8 @@ from .const import DOMAIN
 from .coordinator import Hub
 from .runtime_data import OpenEPaperLinkConfigEntry, OpenEPaperLinkBLERuntimeData
 from .services import async_setup_services
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 from .tag_types import get_tag_types_manager
 from .util import is_ble_entry
 
