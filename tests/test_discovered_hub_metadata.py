@@ -63,9 +63,9 @@ def test_discovered_ap_device_info_omits_configuration_url() -> None:
     hub = Mock()
     hub.get_discovered_hub.return_value = {
         "metadata": {"model": "Mini AP"},
-        "ip": "10.0.20.74",
+        "ip": "192.0.2.74",
     }
-    entity = OpenEPaperLinkDiscoveredAPEntity(hub, "10.0.20.74")
+    entity = OpenEPaperLinkDiscoveredAPEntity(hub, "192.0.2.74")
 
     device_info = entity.device_info
 
@@ -81,8 +81,8 @@ def test_upsert_discovered_hub_schedules_storage_save_for_new_hub() -> None:
 
     hub._upsert_discovered_hub(
         {
-            "hub_id": "10.0.20.74",
-            "ip": "10.0.20.74",
+            "hub_id": "192.0.2.74",
+            "ip": "192.0.2.74",
             "metadata": {"source": "tag_apip"},
             "evidence_path": "tag[AA11].apip",
         },
@@ -95,9 +95,9 @@ def test_upsert_discovered_hub_schedules_storage_save_for_new_hub() -> None:
 def test_upsert_discovered_hub_schedules_storage_save_for_metadata_update() -> None:
     hub = Hub.__new__(Hub)
     hub._discovered_hubs = {
-        "10.0.20.74": {
-            "hub_id": "10.0.20.74",
-            "ip": "10.0.20.74",
+        "192.0.2.74": {
+            "hub_id": "192.0.2.74",
+            "ip": "192.0.2.74",
             "last_seen": "2026-04-05T00:00:00+00:00",
             "discovery_sources": ["tag.apip"],
             "metadata": {"source": "tag_apip"},
@@ -109,8 +109,8 @@ def test_upsert_discovered_hub_schedules_storage_save_for_metadata_update() -> N
 
     hub._upsert_discovered_hub(
         {
-            "hub_id": "10.0.20.74",
-            "ip": "10.0.20.74",
+            "hub_id": "192.0.2.74",
+            "ip": "192.0.2.74",
             "metadata": {"source": "http_sysinfo"},
             "evidence_path": "sys.info",
         },

@@ -42,14 +42,14 @@ def test_extract_remote_hub_evidence_ignores_non_ip_values() -> None:
 
 
 def test_resolve_connected_ap_zero_resolves_to_main_hub_ip() -> None:
-    connected_ap, source = resolve_connected_ap("0.0.0.0", main_hub_ip="10.0.20.73")
+    connected_ap, source = resolve_connected_ap("0.0.0.0", main_hub_ip="192.0.2.73")
 
-    assert connected_ap == "10.0.20.73"
+    assert connected_ap == "192.0.2.73"
     assert source == "tag.apip_zero_fallback_main_hub"
 
 
 def test_resolve_connected_ap_non_zero_uses_tag_value() -> None:
-    connected_ap, source = resolve_connected_ap("10.0.20.74", main_hub_ip="10.0.20.73")
+    connected_ap, source = resolve_connected_ap("192.0.2.74", main_hub_ip="192.0.2.73")
 
-    assert connected_ap == "10.0.20.74"
+    assert connected_ap == "192.0.2.74"
     assert source == "tag.apip"
