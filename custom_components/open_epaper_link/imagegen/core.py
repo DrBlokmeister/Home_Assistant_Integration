@@ -103,18 +103,12 @@ class ImageGen:
             None: If tag information could not be retrieved
 
         Raises:
-            HomeAssistantError: For various error conditions (offline AP, unknown tag, etc.)
+            HomeAssistantError: If tag metadata is missing or invalid.
         """
 
         try:
             # Get hub instance
             hub = get_hub_from_hass(self.hass)
-            if not hub.online:
-                raise HomeAssistantError(
-                    translation_domain=DOMAIN,
-                    translation_key="ap_offline_core",
-                )
-
             # Get tag MAC from entity ID
             try:
                 tag_mac = entity_id.split(".")[1].upper()

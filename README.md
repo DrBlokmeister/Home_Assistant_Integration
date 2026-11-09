@@ -106,10 +106,10 @@ For any issues, the `#atc_ble_oepl` and `#home_assistant` channel on the [OpenEP
 Once flashed and configured, tags are discovered by HA automatically.
 
 ### Option 1: HACS Installation (Recommended)
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=OpenEpaperLink&repository=Home_Assistant_Integration)
+[![Open the fork in Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=DrBlokmeister&repository=Home_Assistant_Integration)
 
 ### Option 2: Manual Installation
-1. Download the `open_epaper_link` folder from the [latest release](https://github.com/jonasniesner/open_epaper_link_homeassistant/releases/latest)
+1. Download the `open_epaper_link` folder from the [latest fork release](https://github.com/DrBlokmeister/Home_Assistant_Integration/releases/latest)
 2. Copy it to your [`custom_components` folder](https://developers.home-assistant.io/docs/creating_integration_file_structure/#where-home-assistant-looks-for-integrations)
 3. Restart Home Assistant
 
@@ -142,8 +142,9 @@ After setup, you can configure additional options through the integration's opti
 **AP Device Configuration:**
 - **Automatic Discovery** (recommended): APs are automatically discovered via DHCP when connected to the network
 - **Manual Setup** (fallback): Go to Settings → Integrations → Add Integration and enter your AP's IP address
-- ⚠️ **Single Hub Limitation**: Only one AP hub allowed per Home Assistant instance
-- All tags connected to the AP are automatically discovered
+- **Multiple APs**: Keep one OpenEPaperLink AP entry. In its integration options, add secondary AP IPv4 addresses, one per line. Automatic discovery can also add verified OEPL peers on the same private IPv4 /24.
+- **Content routing**: Uploads and content commands normally go to the primary AP. If another AP manages a tag's content, add `TAG_MAC=SECONDARY_IP` in the content AP options. Radio commands can go directly to an online secondary. A tag keeps its Home Assistant identity when it moves between APs.
+- **Replacing an existing install**: Follow the [cutover and rollback runbook](docs/multi-ap-fork.md#rehearse-the-hacs-cutover-and-rollback). The fork targets Home Assistant Core 2026.9.4 or later.
 
 **BLE Device Discovery:**
 - Automatic discovery via Bluetooth scanning

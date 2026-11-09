@@ -1,0 +1,36 @@
+name: Check official OEPL releases
+
+on:
+  schedule:
+    - cron: '37 6 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Check the release without pushing a branch or opening a PR
+        type: boolean
+        default: true
+
+concurrency:
+  group: oepl-upstream-release
+
+permissions: {}
+
+jobs:
+  propose-update:
+    if: github.repository == 'DrBlokmeister/Home_Assistant_Integration' && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          fetch-tags: false
+      - name: Propose the latest stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: bash scripts/propose-upstream-release.sh "$GITHUB_REPOSITORY" "$BASE_BRANCH" "$DRY_RUN"

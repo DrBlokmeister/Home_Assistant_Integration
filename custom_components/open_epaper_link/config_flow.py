@@ -1,8 +1,10 @@
 """Config flow for OpenEPaperLink integration."""
 from __future__ import annotations
 
+from ipaddress import IPv4Address
 from typing import Any, Final, Mapping
 import asyncio
+import re
 
 import aiohttp
 import voluptuous as vol
@@ -17,7 +19,7 @@ from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import TextSelectorType
 
-from .const import DOMAIN
+from .const import CONF_CONTENT_APS, CONF_DISCOVER_APS, CONF_SECONDARY_APS, DOMAIN
 from .ble import (
     get_protocol_by_manufacturer_id,
     BLEConnection,
@@ -468,100 +470,124 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """
         return OptionsFlowHandler()
 
+def _parse_secondary_aps(value: str, primary_host: str) -> list[str]:
+    """Normalize the manually entered secondary AP addresses."""
+    addresses: dict[str, None] = {}
+    for line in value.splitlines():
+        if not line.strip():
+            continue
+        address = IPv4Address(line.strip())
+        if (
+            address.is_unspecified
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_multicast
+            or address.is_reserved
+        ):
+            raise ValueError("An AP needs a unicast IPv4 address")
+        normalized = str(address)
+        if normalized != primary_host:
+            addresses[normalized] = None
+    return list(addresses)
+
+
+def _parse_content_aps(value: str, secondary_aps: list[str]) -> dict[str, str]:
+    """Parse explicit content destinations for tags managed by secondary APs."""
+    content_aps: dict[str, str] = {}
+    for line in value.splitlines():
+        if not line.strip():
+            continue
+        mac, separator, address = line.partition("=")
+        mac = mac.strip().upper()
+        address = address.strip()
+        if (
+            not separator
+            or re.fullmatch(r"[0-9A-F]{16}", mac) is None
+            or mac in content_aps
+            or address not in secondary_aps
+        ):
+            raise ValueError("Invalid tag content AP mapping")
+        content_aps[mac] = address
+    return content_aps
+
+
 class OptionsFlowHandler(config_entries.OptionsFlow):
-    """Handle OpenEPaperLink integration options.
+    """Handle OpenEPaperLink AP and tag options."""
 
-    Provides a UI for configuring integration options including:
-
-    - Tag blacklisting to hide unwanted devices
-    - Button and NFC debounce intervals to prevent duplicate triggers
-    - Custom font directories for the image generation system
-
-    The options flow fetches current tag data from the hub to
-    populate the selection fields with accurate information.
-    """
-
-    def __init__(self) -> None:
-        """Initialize options flow.
-
-        The config_entry is now provided automatically by the base OptionsFlow class.
-        Option values will be extracted in async_step_init when needed.
-        """
-        # Option values will be initialized when needed in async_step_init
-        self._blacklisted_tags = []
-        self._button_debounce = 0.5
-        self._nfc_debounce = 1.0
-        self._custom_font_dirs = ""
-
-    async def async_step_init(self, user_input=None):
-        """Manage OpenEPaperLink options.
-
-        Presents a form with configuration options for the integration.
-        When submitted, updates the config entry with the new options.
-
-        This step retrieves a list of available tags from the hub to
-        allow selection of tags to blacklist.
-
-        Args:
-            user_input: User-provided input data, or None on first display
-
-        Returns:
-            FlowResult: Flow result showing the form or saving options
-        """
-        self._blacklisted_tags = self.config_entry.options.get("blacklisted_tags", [])
-        self._button_debounce = self.config_entry.options.get("button_debounce", 0.5)
-        self._nfc_debounce = self.config_entry.options.get("nfc_debounce", 1.0)
-        self._custom_font_dirs = self.config_entry.options.get("custom_font_dirs", "")
-
-        # Check if this is a BLE device
-        entry_data = self.config_entry.runtime_data
-        is_ble_device = is_ble_entry(entry_data)
-        
-        if is_ble_device:
-            # BLE devices don't have configurable options
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Manage options for the existing AP config entry."""
+        entry = self.config_entry
+        if CONF_HOST not in entry.data:
             return self.async_abort(reason="no_options_ble")
 
+        options = entry.options
+        values: dict[str, Any] = {
+            "blacklisted_tags": options.get("blacklisted_tags", []),
+            "button_debounce": options.get("button_debounce", 0.5),
+            "nfc_debounce": options.get("nfc_debounce", 1.0),
+            "custom_font_dirs": options.get("custom_font_dirs", ""),
+            CONF_SECONDARY_APS: "\n".join(options.get(CONF_SECONDARY_APS, [])),
+            CONF_DISCOVER_APS: options.get(CONF_DISCOVER_APS, True),
+            CONF_CONTENT_APS: "\n".join(
+                f"{mac}={address}"
+                for mac, address in options.get(CONF_CONTENT_APS, {}).items()
+            ),
+        }
+        errors: dict[str, str] = {}
         if user_input is not None:
-            # Update blacklisted tags
-            return self.async_create_entry(
-                title="",
-                data={
-                    "blacklisted_tags": user_input.get("blacklisted_tags", []),
-                    "button_debounce": user_input.get("button_debounce", 0.5),
-                    "nfc_debounce": user_input.get("nfc_debounce", 1.0),
-                    "custom_font_dirs": user_input.get("custom_font_dirs", ""),
-                }
-            )
-
-        # Get list of all known tags from the hub (AP devices only)
-        hub = entry_data
-        tags = []
-        for tag_mac in hub.tags:
-            tag_data = hub.get_tag_data(tag_mac)
-            tag_name = tag_data.get("tag_name", tag_mac)
-            tags.append(
-                selector.SelectOptionDict(
-                    value=tag_mac,
-                    label=f"{tag_name} ({tag_mac})"
+            values.update(user_input)
+            try:
+                secondary_aps = _parse_secondary_aps(
+                    values[CONF_SECONDARY_APS], entry.data[CONF_HOST]
                 )
-            )
+            except ValueError:
+                errors[CONF_SECONDARY_APS] = "invalid_secondary_aps"
+            else:
+                try:
+                    content_aps = _parse_content_aps(values[CONF_CONTENT_APS], secondary_aps)
+                except ValueError:
+                    errors[CONF_CONTENT_APS] = "invalid_content_aps"
+                else:
+                    return self.async_create_entry(
+                        title="",
+                        data={
+                            **options,
+                            **values,
+                            CONF_SECONDARY_APS: secondary_aps,
+                            CONF_CONTENT_APS: content_aps,
+                        },
+                    )
+
+        # Keep existing blacklist selections available even when their tags
+        # are hidden or the AP entry has not loaded yet.
+        tag_names = {mac: mac for mac in values["blacklisted_tags"]}
+        if (hub := getattr(entry, "runtime_data", None)) is not None:
+            for mac in hub.tags:
+                name = hub.get_tag_data(mac).get("tag_name", mac)
+                tag_names[mac] = f"{name} ({mac})"
 
         return self.async_show_form(
             step_id="init",
+            errors=errors,
             data_schema=vol.Schema({
                 vol.Optional(
                     "blacklisted_tags",
-                    default=self._blacklisted_tags,
+                    default=values["blacklisted_tags"],
                 ): selector.SelectSelector(
                     selector.SelectSelectorConfig(
-                        options=tags,
+                        options=[
+                            selector.SelectOptionDict(value=mac, label=label)
+                            for mac, label in tag_names.items()
+                        ],
                         multiple=True,
                         mode=selector.SelectSelectorMode.DROPDOWN
                     )
                 ),
                 vol.Optional(
                     "button_debounce",
-                    default=self._button_debounce,
+                    default=values["button_debounce"],
                 ): selector.NumberSelector(
                     selector.NumberSelectorConfig(
                         min=0.0,
@@ -573,7 +599,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 ),
                 vol.Optional(
                     "nfc_debounce",
-                    default=self._nfc_debounce,
+                    default=values["nfc_debounce"],
                 ): selector.NumberSelector(
                     selector.NumberSelectorConfig(
                         min=0.0,
@@ -585,7 +611,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 ),
                 vol.Optional(
                     "custom_font_dirs",
-                    default=self._custom_font_dirs,
+                    default=values["custom_font_dirs"],
                     description={
                         "suggested_value": None
                     }
@@ -595,5 +621,14 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         autocomplete="path"
                     )
                 ),
+                vol.Optional(
+                    CONF_SECONDARY_APS, default=values[CONF_SECONDARY_APS]
+                ): selector.TextSelector(selector.TextSelectorConfig(multiline=True)),
+                vol.Optional(
+                    CONF_DISCOVER_APS, default=values[CONF_DISCOVER_APS]
+                ): selector.BooleanSelector(),
+                vol.Optional(
+                    CONF_CONTENT_APS, default=values[CONF_CONTENT_APS]
+                ): selector.TextSelector(selector.TextSelectorConfig(multiline=True)),
             }),
         )

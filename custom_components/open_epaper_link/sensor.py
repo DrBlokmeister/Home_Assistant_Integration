@@ -27,9 +27,9 @@ from homeassistant.helpers.typing import StateType
 import logging
 
 from . import Hub
-from .entity import OpenEPaperLinkTagEntity, OpenEPaperLinkAPEntity, OpenEPaperLinkBLEEntity
+from .entity import OpenEPaperLinkTagEntity, OpenEPaperLinkAPEntity, OpenEPaperLinkBLEEntity, OpenEPaperLinkDiscoveredAPEntity
 from .runtime_data import OpenEPaperLinkConfigEntry
-from .const import DOMAIN
+from .const import DOMAIN, SIGNAL_REMOTE_AP_DISCOVERED
 from .util import is_ble_entry
 from .tag_types import get_hw_string, get_hw_dimensions
 
@@ -273,6 +273,18 @@ TAG_SENSOR_TYPES: tuple[OpenEPaperLinkSensorEntityDescription, ...] = (
         value_fn=lambda data: data.get("pending"),
     ),
     OpenEPaperLinkSensorEntityDescription(
+        key="connected_ap",
+        name="Connected AP",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda data: data.get("connected_ap"),
+        attr_fn=lambda data: {
+            "is_external": data.get("is_external"),
+            "binding_source": data.get("binding_source"),
+            "binding_last_updated": data.get("binding_last_updated"),
+        },
+        entity_registry_enabled_default=True,
+    ),
+    OpenEPaperLinkSensorEntityDescription(
         key="content_mode",
         name="Content Mode",
         value_fn=lambda data: data.get("content_mode"),
@@ -483,7 +495,6 @@ class OpenEPaperLinkTagSensor(OpenEPaperLinkTagEntity, SensorEntity):
         self.entity_description = description
         self._attr_translation_key = description.key
         self._attr_unique_id = f"{tag_mac}_{description.key}"
-        self.entity_id = f"{DOMAIN}.{tag_mac.lower()}_{description.key}"
         self._attr_entity_registry_enabled_default = description.entity_registry_enabled_default
 
     @property
@@ -529,6 +540,59 @@ class OpenEPaperLinkAPSensor(OpenEPaperLinkAPEntity, SensorEntity):
         if not self.available or self.entity_description.value_fn is None:
             return None
         return self.entity_description.value_fn(self._hub.ap_status)
+
+
+class OpenEPaperLinkRemoteAPSensor(OpenEPaperLinkDiscoveredAPEntity, SensorEntity):
+    """Diagnostic sensor for discovered remote AP hubs."""
+
+    _attr_icon = "mdi:access-point-network"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, hub: Hub, hub_id: str) -> None:
+        super().__init__(hub, hub_id)
+        self._attr_unique_id = f"{self._hub.entry.entry_id}_remote_ap_{hub_id}_last_seen"
+
+    @property
+    def native_value(self):
+        discovered = self._hub.get_discovered_hub(self._hub_id)
+        last_seen = discovered.get("last_seen")
+        if not last_seen:
+            return None
+        return datetime.fromisoformat(last_seen)
+
+    @property
+    def device_class(self) -> SensorDeviceClass:
+        return SensorDeviceClass.TIMESTAMP
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        discovered = self._hub.get_discovered_hub(self._hub_id)
+        metadata = discovered.get("metadata", {})
+        return {
+            "hub_id": discovered.get("hub_id", self._hub_id),
+            "ip": discovered.get("ip"),
+            "discovery_sources": discovered.get("discovery_sources", []),
+            "evidence_path": discovered.get("evidence_path"),
+            "metadata_keys": sorted(metadata.keys()) if isinstance(metadata, dict) else [],
+        }
+
+
+class OpenEPaperLinkRemoteAPConnectivity(OpenEPaperLinkDiscoveredAPEntity, SensorEntity):
+    """Report whether this secondary AP has a live connection."""
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = True
+    _attr_options = ["online", "offline"]
+    _attr_translation_key = "remote_ap_connectivity"
+
+    def __init__(self, hub: Hub, hub_id: str) -> None:
+        super().__init__(hub, hub_id)
+        self._attr_unique_id = f"{hub.entry.entry_id}_remote_ap_{hub_id}_connectivity"
+
+    @property
+    def native_value(self) -> str:
+        return "online" if self._hub.is_ap_online(self._hub_id) else "offline"
 
 
 
@@ -652,6 +716,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenEPaperLinkConfigEntr
     ap_sensors = [OpenEPaperLinkAPSensor(hub, description) for description in AP_SENSOR_TYPES]
     async_add_entities(ap_sensors)
 
+    known_remote_hubs: set[str] = set()
+
+    @callback
+    def async_add_remote_hub_sensor(hub_id: str) -> None:
+        if hub_id in known_remote_hubs:
+            return
+        known_remote_hubs.add(hub_id)
+        async_add_entities([
+            OpenEPaperLinkRemoteAPSensor(hub, hub_id),
+            OpenEPaperLinkRemoteAPConnectivity(hub, hub_id),
+        ])
+
+    for hub_id in hub.get_discovered_hubs().keys():
+        async_add_remote_hub_sensor(hub_id)
+
     @callback
     def async_add_tag_sensor(tag_mac: str) -> None:
         """Add sensors for a new tag.
@@ -689,6 +768,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenEPaperLinkConfigEntr
             hass,
             f"{DOMAIN}_tag_discovered",
             async_add_tag_sensor
+        )
+    )
+    entry.async_on_unload(
+        async_dispatcher_connect(
+            hass,
+            SIGNAL_REMOTE_AP_DISCOVERED,
+            async_add_remote_hub_sensor
         )
     )
 

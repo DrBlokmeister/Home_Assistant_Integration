@@ -1,15 +1,10 @@
 """Shared fixtures for drawcustom tests."""
 import os
-import sys
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from PIL import ImageFont
 
 from PIL import ImageChops
-sys.modules['serial'] = MagicMock()
-sys.modules['serial.tools'] = MagicMock()
-sys.modules['serial.tools.list_ports'] = MagicMock()
-sys.modules['homeassistant.components.bluetooth'] = MagicMock()
 from homeassistant.core import HomeAssistant
 from custom_components.open_epaper_link.imagegen import ImageGen
 from custom_components.open_epaper_link.const import DOMAIN

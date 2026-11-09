@@ -33,7 +33,7 @@
       "invalid_device_config": "Urządzenie zwróciło nieprawidłowe dane konfiguracyjne. Skonfiguruj urządzenie ponownie lub zaktualizuj jego firmware."
     },
     "abort": {
-      "single_instance_allowed": "Tylko jeden hub OpenEPaperLink może być skonfigurowany. Obsługiwanych jest wiele urządzeń BLE, ale tylko jeden hub AP.",
+      "single_instance_allowed": "Można skonfigurować tylko jeden wpis punktu dostępowego OpenEPaperLink. Dodatkowe punkty dostępowe można dodać w opcjach tego wpisu.",
       "unsupported_protocol": "Nieobsługiwany protokół firmware BLE. Obsługiwane są tylko ATC i OEPL.",
       "invalid_advertising_data": "Nie można przetworzyć danych reklamowych urządzenia. Upewnij się, że urządzenie używa kompatybilnego firmware.",
       "no_reconfigure_ble": "Urządzenia BLE nie obsługują rekonfiguracji. Usuń i dodaj urządzenie ponownie, jeśli potrzebna jest zmiana ustawień.",
@@ -41,21 +41,31 @@
     }
   },
   "options": {
+    "error": {
+      "invalid_secondary_aps": "Wpisz po jednym adresie unicast IPv4 w każdym wierszu.",
+      "invalid_content_aps": "Wpisz po jednym unikalnym przypisaniu MAC=IPv4 w każdym wierszu, używając 16-znakowego szesnastkowego adresu MAC i wymienionego dodatkowego punktu dostępowego."
+    },
     "step": {
       "init": {
-        "title": "Zarządzanie tagami",
-        "description": "Wybierz tagi do umieszczenia na czarnej liście. Tagi z listy będą ukryte i ignorowane.",
+        "title": "Punkty dostępowe i tagi",
+        "description": "Skonfiguruj dodatkowe punkty dostępowe, obsługę tagów i generowanie obrazów.",
         "data": {
           "blacklisted_tags": "Czarna lista tagów",
           "button_debounce": "Opóźnienie przycisku (sekundy)",
           "nfc_debounce": "Opóźnienie NFC (sekundy)",
-          "custom_font_dirs": "Niestandardowe katalogi czcionek"
+          "custom_font_dirs": "Niestandardowe katalogi czcionek",
+          "secondary_aps": "Dodatkowe punkty dostępowe",
+          "discover_aps": "Wykrywaj punkty dostępowe",
+          "content_aps": "Punkty dostępowe treści tagów"
         },
         "data_description": {
           "blacklisted_tags": "Tagi do ukrycia; tagi na czarnej liście nie będą aktualizowane ani wywoływały usług.",
           "button_debounce": "Opóźnienie przed przyjęciem kolejnego naciśnięcia przycisku (sekundy).",
           "nfc_debounce": "Opóźnienie przed przyjęciem kolejnego odczytu NFC (sekundy).",
-          "custom_font_dirs": "Katalogi z dodatkowymi czcionkami do generowanych obrazów (oddzielone przecinkami)."
+          "custom_font_dirs": "Katalogi z dodatkowymi czcionkami do generowanych obrazów (oddzielone przecinkami).",
+          "secondary_aps": "Wpisz po jednym adresie IPv4 dodatkowego punktu dostępowego w każdym wierszu. Pozostaw puste, jeśli nie konfigurujesz ich ręcznie.",
+          "discover_aps": "Wykrywaj dodatkowe punkty dostępowe na podstawie zweryfikowanych komunikatów OpenEPaperLink.",
+          "content_aps": "Wpisz po jednym przypisaniu MAC=IPv4 w każdym wierszu. Użyj 16-znakowego adresu MAC tagu i ręcznie skonfigurowanego dodatkowego punktu dostępowego. Tagi bez przypisania używają głównego punktu dostępowego."
         }
       }
     },
@@ -125,6 +135,13 @@
       }
     },
     "sensor": {
+      "remote_ap_connectivity": {
+        "name": "Stan połączenia",
+        "state": {
+          "online": "Połączony",
+          "offline": "Rozłączony"
+        }
+      },
       "ip": {
         "name": "Adres IP"
       },
@@ -282,6 +299,12 @@
     },
     "ap_failed_load_tags": {
       "message": "Nie udało się wczytać tagów z AP pod adresem {host}: {error}"
+    },
+    "content_ap_required": {
+      "message": "Ustaw punkt dostępu obsługujący treść znacznika {tag} w opcjach integracji przed wysłaniem poleceń zmieniających jego treść."
+    },
+    "legacy_opendisplay_entry": {
+      "message": "Ten wpis dotyczy starszego urządzenia OpenDisplay. Skonfiguruj dedykowaną integrację OpenDisplay. Dotychczasowy wpis został zachowany."
     },
     "ap_timeout_action": {
       "message": "Przekroczono czas podczas {action}."

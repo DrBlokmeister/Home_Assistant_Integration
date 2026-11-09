@@ -33,7 +33,7 @@
       "invalid_device_config": "Device returned invalid configuration data. Please reconfigure the device or update its firmware."
     },
     "abort": {
-      "single_instance_allowed": "Only one OpenEPaperLink hub can be configured. Multiple BLE devices are supported, but only one AP hub is allowed.",
+      "single_instance_allowed": "Only one OpenEPaperLink AP entry can be configured. Add additional access points in that entry's options.",
       "unsupported_protocol": "Unsupported BLE firmware protocol. Only ATC firmware is supported.",
       "invalid_advertising_data": "Could not parse device advertising data. Please ensure the device is using compatible firmware.",
       "no_reconfigure_ble": "BLE devices do not support reconfiguration. Remove and re-add the device if you need to change its settings.",
@@ -41,21 +41,31 @@
     }
   },
   "options": {
+    "error": {
+      "invalid_secondary_aps": "Enter one unicast IPv4 address per line.",
+      "invalid_content_aps": "Enter a unique MAC=IPv4 mapping per line using a 16-character hexadecimal MAC and a listed secondary AP."
+    },
     "step": {
       "init": {
-        "title": "Tag Management",
-        "description": "Select tags to blacklist. Blacklisted tags will be hidden and ignored.",
+        "title": "Access Points and Tags",
+        "description": "Configure secondary access points, tag handling, and image generation.",
         "data": {
           "blacklisted_tags": "Blacklisted Tags",
           "button_debounce": "Button Debounce Time (seconds)",
           "nfc_debounce": "NFC Debounce Time (seconds)",
-          "custom_font_dirs": "Custom Font Directories"
+          "custom_font_dirs": "Custom Font Directories",
+          "secondary_aps": "Secondary access points",
+          "discover_aps": "Discover access points",
+          "content_aps": "Tag content access points"
         },
         "data_description": {
           "blacklisted_tags": "Tags to hide; blacklisted tags will not update or trigger services.",
           "button_debounce": "Delay before another button press is accepted (seconds).",
           "nfc_debounce": "Delay before another NFC tap is accepted (seconds).",
-          "custom_font_dirs": "Comma-separated directories containing additional fonts for generated images."
+          "custom_font_dirs": "Comma-separated directories containing additional fonts for generated images.",
+          "secondary_aps": "Enter one secondary AP IPv4 address per line. Leave blank if there are no manually configured secondary APs.",
+          "discover_aps": "Discover secondary APs from verified OpenEPaperLink messages.",
+          "content_aps": "Enter one MAC=IPv4 mapping per line. Use the 16-character tag MAC and a manually configured secondary AP. Tags without a mapping use the primary AP."
         }
       }
     },
@@ -125,6 +135,13 @@
       }
     },
     "sensor": {
+      "remote_ap_connectivity": {
+        "name": "Connection status",
+        "state": {
+          "online": "Online",
+          "offline": "Offline"
+        }
+      },
       "ip": {
         "name": "IP Address"
       },
@@ -277,6 +294,8 @@
     "ble_device_not_detected": { "message": "BLE device {name} ({mac_address}) not detected in Bluetooth range." },
     "ap_cannot_connect": { "message": "Cannot connect to AP at {host}: {error}" },
     "ap_failed_load_tags": { "message": "Failed to load tags from AP at {host}: {error}" },
+    "content_ap_required": { "message": "Set a content access point for tag {tag} in the integration options before sending commands that change its content." },
+    "legacy_opendisplay_entry": { "message": "This entry is for a legacy OpenDisplay device. Set up the dedicated OpenDisplay integration. The existing entry has been kept." },
     "ap_timeout_action": { "message": "Timeout during {action}." },
     "ap_network_error_action": { "message": "Network error during {action}: {error}" },
     "ap_failed_action_http": { "message": "Failed to {action}: HTTP {status_code} - {response_text}" },

@@ -8,7 +8,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, Entity
 from .ble import BLEDeviceMetadata
 
-from .const import DOMAIN, ATC_CONFIG_URL
+from .const import DOMAIN, ATC_CONFIG_URL, SIGNAL_AP_UPDATE
 from .tag_types import get_hw_string, get_hw_dimensions
 
 if TYPE_CHECKING:
@@ -73,13 +73,70 @@ class OpenEPaperLinkAPEntity(Entity):
         self.async_write_ha_state()
 
 
+class OpenEPaperLinkDiscoveredAPEntity(Entity):
+    """Base entity for discovered secondary AP hubs."""
+
+    _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = False
+
+    def __init__(self, hub: Hub, hub_id: str) -> None:
+        self._hub = hub
+        self._hub_id = hub_id
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info for a discovered AP hub."""
+        discovered = self._hub.get_discovered_hub(self._hub_id)
+        metadata = discovered.get("metadata", {})
+        ip_address = discovered.get("ip", self._hub_id)
+        model = metadata.get("model") or metadata.get("ap_env") or "Discovered AP"
+
+        return DeviceInfo(
+            identifiers={(DOMAIN, f"ap_{self._hub_id}")},
+            name=f"OpenEPaperLink AP ({ip_address})",
+            model=model,
+            manufacturer="OpenEPaperLink",
+            via_device=(DOMAIN, "ap"),
+        )
+
+    @property
+    def available(self) -> bool:
+        """Keep remote AP diagnostics available when the AP goes offline."""
+        return self._hub.get_discovered_hub(self._hub_id).get("hub_id") == self._hub_id
+
+    async def async_added_to_hass(self) -> None:
+        """Register update signals."""
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                f"{DOMAIN}_connection_status",
+                self._handle_connection_status,
+            )
+        )
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                SIGNAL_AP_UPDATE,
+                self._handle_update,
+            )
+        )
+
+    @callback
+    def _handle_connection_status(self, is_online: bool) -> None:
+        self.async_write_ha_state()
+
+    @callback
+    def _handle_update(self) -> None:
+        self.async_write_ha_state()
+
+
 class OpenEPaperLinkTagEntity(Entity):
     """
     Base entity for tag-level entities (sensors, buttons, text, image).
 
     Provides:
     - device_info for tag device
-    - available property (hub.online + tag online + not blacklisted)
+    - availability based on the tag's AP, freshness, and blacklist
     - Signal registration for tag updates and connection status
     - Common callbacks for state updates
 
@@ -120,7 +177,7 @@ class OpenEPaperLinkTagEntity(Entity):
     def available(self) -> bool:
         """Return if the entity is available."""
         return (
-                self._hub.online
+                self._hub.is_tag_ap_online(self._tag_mac)
                 and self._hub.is_tag_online(self._tag_mac)
                 and self._tag_mac not in self._hub.get_blacklisted_tags()
         )

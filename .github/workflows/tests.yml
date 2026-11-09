@@ -7,30 +7,28 @@ on:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.12.0
-        uses: actions/setup-python@v5
-        with:
-          python-version: 3.12.0
-          cache: 'pip'
-
-      - name: Create virtual environment
+      - name: Run tests in the supported Home Assistant image
         run: |
-          python -m venv venv
-          . venv/bin/activate
-          echo "VIRTUAL_ENV=$VIRTUAL_ENV" >> $GITHUB_ENV
-          echo "$VIRTUAL_ENV/bin" >> $GITHUB_PATH
-
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install -r requirements_test.txt
-
-      - name: Run tests
-        run: |
-          PYTHONPATH=${{ github.workspace }} pytest tests -v
+          # Pin the rendering libraries used by the pixel-exact snapshots.
+          docker run --rm -i --entrypoint /bin/sh \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/source,readonly" \
+            ghcr.io/home-assistant/home-assistant:2026.9.4@sha256:3e6710a7ab2a61311d9d899b719f6c3657791c63e8f4942cec4ebc42401d6b76 -eu -s <<'SH'
+          mkdir /tmp/oepl-src
+          cp -R /source/custom_components /source/tests /source/pyproject.toml /source/requirements_test.txt /tmp/oepl-src/
+          cd /tmp/oepl-src
+          export UV_INDEX_STRATEGY=unsafe-best-match
+          uv venv --system-site-packages /tmp/oepl-tests
+          uv pip install --python /tmp/oepl-tests/bin/python -r requirements_test.txt
+          /tmp/oepl-tests/bin/python -c 'import json, subprocess, sys; manifest = json.load(open("custom_components/open_epaper_link/manifest.json")); subprocess.check_call(["uv", "pip", "install", "--python", sys.executable, *manifest["requirements"]])'
+          /tmp/oepl-tests/bin/python -m pytest -q tests/test_*.py
+          /tmp/oepl-tests/bin/python -m pytest -q tests/drawcustom
+          SH

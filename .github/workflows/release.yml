@@ -10,6 +10,7 @@ on:
 
 jobs:
   release:
+    if: github.repository == 'OpenEPaperLink/Home_Assistant_Integration'
     runs-on: ubuntu-latest
     permissions:
       contents: write
