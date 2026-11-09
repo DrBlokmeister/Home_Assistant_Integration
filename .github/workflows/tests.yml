@@ -18,9 +18,10 @@ jobs:
 
       - name: Run tests in the supported Home Assistant image
         run: |
+          # Pin the rendering libraries used by the pixel-exact snapshots.
           docker run --rm -i --entrypoint /bin/sh \
             --mount "type=bind,source=$GITHUB_WORKSPACE,target=/source,readonly" \
-            ghcr.io/home-assistant/home-assistant:2026.9.4 -eu -s <<'SH'
+            ghcr.io/home-assistant/home-assistant:2026.9.4@sha256:3e6710a7ab2a61311d9d899b719f6c3657791c63e8f4942cec4ebc42401d6b76 -eu -s <<'SH'
           mkdir /tmp/oepl-src
           cp -R /source/custom_components /source/tests /source/pyproject.toml /source/requirements_test.txt /tmp/oepl-src/
           cd /tmp/oepl-src
