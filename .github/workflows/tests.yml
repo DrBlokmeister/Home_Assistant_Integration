@@ -18,16 +18,26 @@ jobs:
 
       - name: Run tests in the supported Home Assistant image
         run: |
+          mkdir -p "$RUNNER_TEMP/oepl-reference-candidates"
           docker run --rm -i --entrypoint /bin/sh \
             --mount "type=bind,source=$GITHUB_WORKSPACE,target=/source,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/oepl-reference-candidates,target=/references" \
             ghcr.io/home-assistant/home-assistant:2026.9.4 -eu -s <<'SH'
           mkdir /tmp/oepl-src
           cp -R /source/custom_components /source/tests /source/pyproject.toml /source/requirements_test.txt /tmp/oepl-src/
+          cp /source/snapshot_probe.py /tmp/oepl-src/
           cd /tmp/oepl-src
           export UV_INDEX_STRATEGY=unsafe-best-match
           uv venv --system-site-packages /tmp/oepl-tests
           uv pip install --python /tmp/oepl-tests/bin/python -r requirements_test.txt
           /tmp/oepl-tests/bin/python -c 'import json, subprocess, sys; manifest = json.load(open("custom_components/open_epaper_link/manifest.json")); subprocess.check_call(["uv", "pip", "install", "--python", sys.executable, *manifest["requirements"]])'
-          /tmp/oepl-tests/bin/python -m pytest -q tests/test_*.py
+          /tmp/oepl-tests/bin/python -m snapshot_probe
           /tmp/oepl-tests/bin/python -m pytest -q tests/drawcustom
           SH
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oepl-reference-candidates
+          path: ${{ runner.temp }}/oepl-reference-candidates/
+          if-no-files-found: error
+          retention-days: 7
